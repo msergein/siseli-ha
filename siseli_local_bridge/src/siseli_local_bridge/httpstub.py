@@ -30,10 +30,12 @@ was left out or hardcoded rather than guessed at.
 
 import json
 import time
+import urllib.parse
+import urllib.request
 from typing import Optional
 
 from . import tcpstack
-from .config import DEV_SN, MQTT_BROKER_HOSTNAME
+from .config import DEV_SN, HTTP_STUB_REAL_IPS, MQTT_BROKER_HOSTNAME
 from .loggers import log
 
 _HEADER_END = b"\r\n\r\n"
@@ -109,7 +111,7 @@ def _json_response(payload: dict) -> bytes:
     return header + body
 
 
-def _handle_checkin() -> bytes:
+def _handle_checkin(request: Optional[dict] = None) -> bytes:
     now_ms = int(time.time() * 1000)
     return _json_response({
         "code": 0,
@@ -133,7 +135,7 @@ def _handle_checkin() -> bytes:
     })
 
 
-def _handle_find_single() -> bytes:
+def _handle_find_single(request: Optional[dict] = None) -> bytes:
     # DEV_SN (config.py) replaces what a real capture showed for one specific
     # device. Never seen a second device to infer a general derivation rule from,
     # so this is a configurable literal rather than something computed from the
@@ -142,26 +144,141 @@ def _handle_find_single() -> bytes:
     return _json_response({"code": 0, "msg": "Success", "data": {"devSN": DEV_SN}})
 
 
-def _handle_servers_mqtt() -> bytes:
+def _handle_servers_mqtt(request: Optional[dict] = None) -> bytes:
     server = {"host": MQTT_BROKER_HOSTNAME, "port": 1883, "ssl": 0, "sslCertificate": None}
     return _json_response({"code": 0, "msg": "Success", "data": {"main": server, "mains": [server]}})
+
+
+def _handle_gather_protocol(request: Optional[dict] = None) -> bytes:
+    """The protocol descriptor request added by firmware V1.44.5_SolarV67.
+
+    The dongle sends it right after /dtu/checkin and expects the vendor's protocol
+    descriptor, not just a version. This forwards the dongle's own request (with its
+    Authorization header) to the real HTTP API and relays the answer, so the local
+    bootstrap stays faithful to what the cloud would have said. If the upstream call
+    fails, fall back to the version echo so a missing internet link does not kill an
+    otherwise working local session.
+    """
+    headers = (request or {}).get("headers") or {}
+    auth = headers.get("authorization")
+    path = (request or {}).get("path", "")
+    if auth and path:
+        upstream = "http://" + (HTTP_STUB_REAL_IPS[0] if HTTP_STUB_REAL_IPS else "8.212.16.60") + path
+        forwarded = {k: v for k, v in headers.items()
+                     if k not in ("host", "connection", "content-length")}
+        forwarded["Host"] = "dtu.access.solar.siseli.com"
+        try:
+            req = urllib.request.Request(upstream, headers=forwarded)
+            with urllib.request.urlopen(req, timeout=8) as response:
+                body = response.read()
+            return (
+                b"HTTP/1.1 200 OK\r\n"
+                b"Server: nginx/1.20.1\r\n"
+                b"Content-Type: application/json;charset=UTF-8\r\n"
+                + b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+                b"Connection: keep-alive\r\n"
+                b"Cache-Control: no-cache\r\n\r\n"
+                + body
+            )
+        except Exception as exc:
+            log(f"[HTTP STUB] gatherProtocol upstream failed: {exc}", level="warning")
+
+    protocol_no = "MH2089635"
+    ver_code = 42
+    if request:
+        _, _, query = request.get("path", "").partition("?")
+        params = urllib.parse.parse_qs(query)
+        protocol_no = params.get("protocolNo", [protocol_no])[0]
+        try:
+            ver_code = int(params.get("verCode", [ver_code])[0])
+        except ValueError:
+            pass
+    return _json_response({
+        "code": 0,
+        "msg": "Success",
+        "data": {
+            "autoAdaptive": 0,
+            "verCode": ver_code,
+            "verText": "1.0.0",
+            "verState": 10,
+            "protocolNo": protocol_no,
+            "forceUpdate": 0,
+        },
+    })
+
+def _handle_sync_time(request: Optional[dict] = None) -> bytes:
+    """The dongle asks the server to synchronise its clock at boot (firmware
+    V1.44.5_SolarV67). Answer locally: the time is not device-specific and this
+    keeps the bootstrap independent of the internet."""
+    now_ms = int(time.time() * 1000)
+    return _json_response({
+        "code": 0,
+        "msg": "Success",
+        "data": {
+            "timeInText": time.strftime("%Y-%m-%dT%H:%M:%S.000+00:00", time.gmtime()),
+            "timeInMills": str(now_ms),
+            "utcOffset": "+00:00",
+        },
+    })
+
+
+def _proxy_to_cloud(request: dict) -> Optional[bytes]:
+    """Forward an unknown /dtu/ bootstrap call to the real HTTP API.
+
+    New firmware adds endpoints over time (gatherProtocol and syncTime are two
+    this one asked for). Relaying them with the dongle's own Authorization header
+    is protocol-agnostic: no endpoint list and no model constants. The known calls
+    above stay local so a working bootstrap does not depend on the internet.
+    """
+    headers = request.get("headers") or {}
+    path = request.get("path") or ""
+    if not path.startswith("/dtu/") or not headers.get("authorization"):
+        return None
+    upstream = "http://" + (HTTP_STUB_REAL_IPS[0] if HTTP_STUB_REAL_IPS else "8.212.16.60") + path
+    forwarded = {k: v for k, v in headers.items()
+                 if k not in ("host", "connection", "content-length")}
+    forwarded["Host"] = "dtu.access.solar.siseli.com"
+    try:
+        req = urllib.request.Request(upstream, data=request.get("body") or None, headers=forwarded)
+        with urllib.request.urlopen(req, timeout=8) as response:
+            body = response.read()
+    except Exception as exc:
+        log(f"[HTTP STUB] upstream failed for {path}: {exc}", level="warning")
+        return None
+    return (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Server: nginx/1.20.1\r\n"
+        b"Content-Type: application/json;charset=UTF-8\r\n"
+        + b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+        b"Connection: keep-alive\r\n"
+        b"Cache-Control: no-cache\r\n\r\n"
+        + body
+    )
 
 
 _ROUTES = {
     ("POST", "/dtu/checkin"): _handle_checkin,
     ("POST", "/dtu/devices/findSingle"): _handle_find_single,
     ("GET", "/dtu/servers/mqtt"): _handle_servers_mqtt,
+    # Firmware V1.44.5_SolarV67 asks this after check-in; a 404 makes it reset
+    # the bootstrap connection (observed 2026-11-12 on an Easun SMT 6.2KW).
+    ("GET", "/dtu/gatherProtocol"): _handle_gather_protocol,
+    ("GET", "/dtu/device/syncTime/cmd"): _handle_sync_time,
 }
 
 
 def _handle_request(request: dict) -> bytes:
-    key = (request["method"], request["path"])
+    key = (request["method"], request["path"].split("?", 1)[0])
     handler = _ROUTES.get(key)
     if handler is None:
+        proxied = _proxy_to_cloud(request)
+        if proxied is not None:
+            log(f"[HTTP STUB] proxied {request['method']} {request['path']}")
+            return proxied
         log(f"[HTTP STUB] unhandled {request['method']} {request['path']}", level="warning")
         return b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n"
     log(f"[HTTP STUB] {request['method']} {request['path']}")
-    return handler()
+    return handler(request)
 
 
 def _on_established(conn: tcpstack.Connection) -> None:

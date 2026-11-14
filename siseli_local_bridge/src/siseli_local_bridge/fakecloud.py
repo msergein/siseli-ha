@@ -870,7 +870,7 @@ _QFLAG_INTERVAL_SEC = 60
 #: (conn.live_inflight). A command not answered within _LIVE_REPLY_TIMEOUT_SEC frees its
 #: place; a command from Home Assistant takes the next free place (_claim_dongle).
 LIVE_POLL_MIN_INTERVAL_SEC = 1
-_LIVE_MAX_INFLIGHT = 2
+_LIVE_MAX_INFLIGHT = max(1, int(os.getenv("LIVE_MAX_INFLIGHT", "2") or 2))
 #: A place in flight is freed after this, so a missing answer cannot stall the
 #: live cycle. This is a pacing timeout, not the token lifetime: the token->command
 #: entry is kept for _LIVE_TOKEN_TTL_SEC, so an answer arriving after the place was
