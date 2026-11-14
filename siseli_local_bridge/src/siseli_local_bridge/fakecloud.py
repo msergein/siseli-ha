@@ -2149,7 +2149,15 @@ def send_manual_refresh() -> bool:
     2026-09-14, see protocole-cloud-dongle/README.md): {"i":501,"b":{}}. Exposed
     as a button so a stalled poll cycle can be kicked without waiting for the
     next scheduled tick, and to let the state_diff/state_snapshot debug logs show
-    exactly what a manual refresh actually returns."""
+    exactly what a manual refresh actually returns.
+
+    In UPSTREAM_RELAY mode the real cloud owns the slow poll; a locally generated
+    i=501 would not carry a local token and its reply would be forwarded upstream.
+    Refuse it instead of corrupting the relay session.
+    """
+    if UPSTREAM_RELAY:
+        log("[CONTROL] manual refresh refused in upstream-relay mode: the cloud owns the slow poll", level="warning")
+        return False
     conn = _first_established_connection()
     if conn is None:
         log("[CONTROL] no established local-cloud connection to send on", level="warning")
