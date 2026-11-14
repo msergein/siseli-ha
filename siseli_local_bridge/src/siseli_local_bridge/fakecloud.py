@@ -70,6 +70,24 @@ LIVE_PROBE_TIMEOUT_SEC = 3.0
 LIVE_PROBE_STALL_SEC = 60.0
 LIVE_PROBE_MAX_CONSECUTIVE_MISSING = 10
 
+#: Always-on diagnostic journal of fast live answers and slow reference snapshots.
+#: LIVE_MONITOR_ONLY is independent: it keeps the fast answers out of state/HA while
+#: still writing this journal. Rotated by size, so a long run cannot fill /data.
+LIVE_MONITOR = os.getenv("LIVE_MONITOR", "1").strip().lower() in ("1", "true", "yes", "on")
+LIVE_MONITOR_ONLY = os.getenv("LIVE_MONITOR_ONLY", "0").strip().lower() in ("1", "true", "yes", "on")
+_MONITOR_PATH = os.path.join(os.path.dirname(STATE_CACHE_FILE) or "/data", "monitor.jsonl")
+_MONITOR_MAX_BYTES = int(os.getenv("MONITOR_MAX_BYTES", str(20 * 1024 * 1024)) or 20 * 1024 * 1024)
+_MONITOR_BACKUPS = max(1, int(os.getenv("MONITOR_BACKUPS", "5") or 5))
+_MONITOR_LOCK = threading.Lock()
+_MONITOR_KEYS = (
+    "grid_v", "grid_hz", "mains_power_w", "load_w", "load_pct", "out_v", "out_hz",
+    "pv_v", "pv_current_a", "pv_w", "pv2_v", "pv2_power_w", "generation_power_w",
+    "bat_v", "dischg_current", "bat_charge_current", "battery_status", "bms_current_soc",
+    "bms_charging_current_a", "bms_discharge_current_a", "bms_max_cell_mv",
+    "bms_min_cell_mv", "bms_cell_delta_mv", "inverter_temperature_c",
+    "boost_temperature_c", "transformer_temperature_c", "status_code", "eo8w_flags_raw",
+)
+
 from .parsers import SolarParser
 
 MQTT_CONNECT = 1
@@ -273,6 +291,92 @@ _FORCE_RECONNECT_TEST = False  # Tested 2026-09-12: forcing a fresh MQTT session
 # (default off) rather than deleted, in case a future firmware version changes this.
 
 
+def _rotate_monitor_if_needed() -> None:
+    """Keep monitor.jsonl bounded: .1 is the newest backup, .N the oldest.
+    Call with _MONITOR_LOCK held."""
+    try:
+        if os.path.getsize(_MONITOR_PATH) < _MONITOR_MAX_BYTES:
+            return
+    except OSError:
+        return
+    try:
+        os.remove(f"{_MONITOR_PATH}.{_MONITOR_BACKUPS}")
+    except OSError:
+        pass
+    for index in range(_MONITOR_BACKUPS - 1, 0, -1):
+        try:
+            os.replace(f"{_MONITOR_PATH}.{index}", f"{_MONITOR_PATH}.{index + 1}")
+        except OSError:
+            pass
+    try:
+        os.replace(_MONITOR_PATH, f"{_MONITOR_PATH}.1")
+    except OSError:
+        pass
+
+
+def _monitor_write(record: dict) -> None:
+    if not LIVE_MONITOR:
+        return
+    try:
+        with _MONITOR_LOCK:
+            _rotate_monitor_if_needed()
+            with open(_MONITOR_PATH, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+    except Exception as exc:
+        log(f"[MONITOR] write failed: {exc}", level="warning")
+
+
+def _monitor_slow(reason: str) -> None:
+    """Snapshot the parsed slow/reference state (5-minute push or full poll)."""
+    if not LIVE_MONITOR:
+        return
+    from . import state as _shared_state
+    snapshot = _shared_state.snapshot_state()
+    record = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "source": "slow", "reason": reason}
+    for key in _MONITOR_KEYS:
+        record[key] = snapshot.get(key)
+    _monitor_write(record)
+
+
+def _monitor_fast(command: Optional[str], token: Optional[str], envelope: dict) -> None:
+    """Log one fast live answer without touching shared state or MQTT."""
+    if not LIVE_MONITOR:
+        return
+    body = envelope.get("b") if isinstance(envelope, dict) else None
+    co = body.get("co") if isinstance(body, dict) else None
+    record = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "source": "fast",
+        "command": command,
+        "token": token,
+        "e": envelope.get("e") if isinstance(envelope, dict) else None,
+    }
+    if co:
+        try:
+            raw = base64.b64decode(co + "==")
+            record["raw_text"] = raw.decode("latin1", errors="replace")[:500]
+            record["raw_hex"] = raw[:200].hex()
+        except (ValueError, binascii.Error):
+            record["raw_error"] = "bad base64"
+    _monitor_write(record)
+
+
+def _take_live_command(conn: tcpstack.Connection, token: Optional[str]):
+    """The command and round a live token was issued for, from its token map.
+
+    A token is answered once, so the entry is popped. An unknown or expired token
+    returns (None, None): the caller must not fall back to the answer's shape.
+    """
+    item = getattr(conn, "live_token_command", {}).pop(token, None)
+    if item is None:
+        return None, None
+    if isinstance(item, tuple):
+        command = item[0]
+        cycle = item[2] if len(item) > 2 else None
+        return command, cycle
+    return item, None
+
+
 def _handle_publish(control: int, body: bytes, conn: tcpstack.Connection) -> bytes:
     qos = (control >> 1) & 0x03
     if len(body) < 2:
@@ -290,6 +394,7 @@ def _handle_publish(control: int, body: bytes, conn: tcpstack.Connection) -> byt
         log_payload_preview("[LOCAL CLOUD PAYLOAD]", payload, topic=topic)
 
     probe_consumed = False
+    fast_reply = False
     if payload:
         # Blocks a live read refreshed seconds ago are left out of the dongle's own
         # (possibly minute-old) copy; nothing left means nothing to decode.
@@ -313,16 +418,22 @@ def _handle_publish(control: int, body: bytes, conn: tcpstack.Connection) -> byt
             # counting them made the stall check unable to ever fire.
             envelope = _extract_envelope(payload)
             command = None
-            if isinstance(envelope, dict) and envelope.get("i") == 504:
+            fast_reply = isinstance(envelope, dict) and envelope.get("i") == 504
+            if fast_reply:
                 token = envelope.get("t")
                 token = str(token) if token is not None else None
                 # The round the answered command was sent in (2.7.00: rounds overlap,
                 # the next one starting while the last answers of this one are due).
                 # The probe owns its own replies; do not decode them as telemetry.
                 probe_consumed = _probe_handle_reply(conn, token, envelope)
-                conn.answer_cycle = getattr(conn, "live_token_cycle", {}).pop(token, None)
-                command = getattr(conn, "live_token_command", {}).pop(token, None)
+                command, cycle = _take_live_command(conn, token)
+                stale_cycle = getattr(conn, "live_token_cycle", {}).pop(token, None)
+                conn.answer_cycle = cycle if cycle is not None else stale_cycle
                 _live_answered(conn, token)
+                if LIVE_MONITOR and not probe_consumed:
+                    _monitor_fast(command, token, envelope)
+                if LIVE_MONITOR_ONLY:
+                    probe_consumed = True
             if isinstance(envelope, dict) and envelope.get("i") == 502:
                 conn.poll_reply_count = getattr(conn, "poll_reply_count", 0) + 1
                 conn.last_reply_ts = time.monotonic()
@@ -332,6 +443,8 @@ def _handle_publish(control: int, body: bytes, conn: tcpstack.Connection) -> byt
                     _log_command_reply(payload, conn, command)
             finally:
                 conn.answer_cycle = None
+        if LIVE_MONITOR and not fast_reply:
+            _monitor_slow("full_poll" if topic.endswith("/dev_rpc_reply") else "push")
 
     return _build_ack_publish(topic, payload)
 
@@ -367,19 +480,23 @@ def _pi30_verified_payload(raw: bytes) -> Optional[str]:
     return body[1:].decode("ascii", errors="replace")
 
 
-def _h_block_of(raw: bytes) -> Optional[str]:
-    """The telemetry block an H command answer is (HGRID -> WdRR, HBMS1 -> Yavb, ...),
-    judged by the answer's own shape, so a lost or reordered reply can never put one
-    command's text under another block's name. None when it fits no block, or two."""
+def _h_shape_fits(command: str, raw: bytes) -> bool:
+    """True when raw has the shape of the block `command` is expected to answer.
+
+    Diagnostic only (LIVE_PROBE): it checks a known command's answer, it never assigns
+    a type to an unknown answer. Production types answers by the echoed command; see
+    _block_for_answer.
+    """
+    fits = _H_SHAPES.get(command)
+    if fits is None:
+        return False
     try:
         text = raw.decode("ascii").strip("\r\n")
     except UnicodeDecodeError:
-        return None
+        return False
     if not text.startswith("("):
-        return None
-    tokens = text[1:].split(" ")
-    matches = [command for command, fits in _H_SHAPES.items() if fits(tokens)]
-    return _H_BLOCKS[matches[0]] if len(matches) == 1 else None
+        return False
+    return fits(text[1:].split(" "))
 
 
 def _collect_live_block(block: str, raw: bytes, conn: tcpstack.Connection) -> None:
@@ -528,24 +645,26 @@ def _apply_qpiws(flags: str, conn: tcpstack.Connection) -> None:
 
 
 def _block_for_answer(command: Optional[str], raw: bytes) -> Optional[str]:
-    """The block an H answer carries, typed by the command it answers.
+    """The block an H answer carries, typed only by the command it answers.
 
     The dongle echoes the command's "t", so the command is known even when two
-    blocks share a shape. HPVINV08's HBMS2 answer carries nine tokens and fits the
-    HOP shape, which is exactly how BMS values were published as load power. The
-    shape is only a fallback for replies whose token was lost (or for non-H
-    commands), never the primary type.
+    blocks share a shape. There is deliberately no shape fallback: an unknown
+    command returns None and the answer is dropped. A wrong value in Home
+    Assistant can trigger a wrong automation; no value is safer.
     """
-    if command in _H_BLOCKS:
-        return _H_BLOCKS[command]
-    return _h_block_of(raw)
+    return _H_BLOCKS.get(command)
 
 
 def _log_command_reply(payload: bytes, conn: tcpstack.Connection, command: Optional[str] = None) -> None:
-    """Log the inverter's answer to a dev_rpc command ("(ACK9", "(NAKss", "^1",
+    """Handle the inverter's answer to a dev_rpc command ("(ACK9", "(NAKss", "^1",
     "^0", or a query's data). Telemetry replies carry a "ct" block list and are
-    skipped; a command reply carries a single "co" field. The periodic QFLAG
-    query's answer goes to _apply_qflag instead."""
+    skipped; a command reply carries a single "co" field.
+
+    `command` comes from the token the dongle echoed; it is the only source of an
+    answer's type. Without it the answer is logged but never decoded. `last_command`
+    is used for display only, never for typing: with two commands in flight it can
+    point at the other one.
+    """
     envelope = _extract_envelope(payload)
     body = envelope.get("b") if isinstance(envelope, dict) else None
     if isinstance(envelope, dict) and envelope.get("i") == 504 and not isinstance(body, dict) and envelope.get("e"):
@@ -562,24 +681,37 @@ def _log_command_reply(payload: bytes, conn: tcpstack.Connection, command: Optio
     text = raw.decode("latin1").strip("\r\n")
     # Drop the trailing CRC bytes of PI30 answers when they are not printable.
     text = "".join(ch if 32 <= ord(ch) < 127 else "." for ch in text)
-    command = getattr(conn, "last_command", "?")
-    if _QFLAG_RE.match(text):
-        # Recognised by its shape, not by last_command: a switch pressed in the
-        # same second as the minute's QFLAG would otherwise swap the labels.
-        _apply_qflag(text, conn)
+    display = command or getattr(conn, "last_command", "?")
+    if text.startswith(("(ACK", "(NAK", "^0", "^1")):
+        log(f"[CONTROL] inverter answered {display}: {text}", level="warning")
         return
-    block = _block_for_answer(command, raw)
-    if block is not None:
-        _collect_live_block(block, raw, conn)
+    if command == "QFLAG":
+        if _QFLAG_RE.match(text):
+            _apply_qflag(text, conn)
+        else:
+            log(f"[CONTROL] QFLAG answer not recognized: {text}", level="warning")
         return
-    live = _pi30_verified_payload(raw)
-    if live is not None and live in _QMOD_MODES:
-        _apply_qmod(live)
+    if command in _H_BLOCKS:
+        _collect_live_block(_H_BLOCKS[command], raw, conn)
         return
-    if live is not None and _QPIWS_RE.match(live):
-        _apply_qpiws(live, conn)
+    if command == "QMOD":
+        live = _pi30_verified_payload(raw)
+        if live is not None and live in _QMOD_MODES:
+            _apply_qmod(live)
+        else:
+            log(f"[CONTROL] QMOD answer not recognized: {text}", level="warning")
         return
-    log(f"[CONTROL] inverter answered {command}: {text}", level="warning")
+    if command == "QPIWS":
+        live = _pi30_verified_payload(raw)
+        if live is not None and _QPIWS_RE.match(live):
+            _apply_qpiws(live, conn)
+        else:
+            log(f"[CONTROL] QPIWS answer not recognized: {text}", level="warning")
+        return
+    if command is None:
+        log(f"[CONTROL] answer without a token, not decoded ({display}): {text}", level="warning")
+        return
+    log(f"[CONTROL] inverter answered {display}: {text}", level="warning")
 
 
 def _handle_frame(control: int, body: bytes, conn: tcpstack.Connection) -> bytes:
@@ -739,7 +871,12 @@ _QFLAG_INTERVAL_SEC = 60
 #: place; a command from Home Assistant takes the next free place (_claim_dongle).
 LIVE_POLL_MIN_INTERVAL_SEC = 1
 _LIVE_MAX_INFLIGHT = 2
+#: A place in flight is freed after this, so a missing answer cannot stall the
+#: live cycle. This is a pacing timeout, not the token lifetime: the token->command
+#: entry is kept for _LIVE_TOKEN_TTL_SEC, so an answer arriving after the place was
+#: freed is still typed by its token, never by its shape.
 _LIVE_REPLY_TIMEOUT_SEC = 2.5
+_LIVE_TOKEN_TTL_SEC = 60.0
 _LIVE_AFTER_REPLY_SEC = 0.05
 _H_BLOCKS = {
     "HGRID": "WdRR",
@@ -796,7 +933,9 @@ _LIVE_BLOCK_FRESH_SEC = 150.0
 #: exclude each other.
 _H_SHAPES = {
     "HBMS1": lambda t: len(t) == 10 and re.fullmatch(r"[01]{16}", t[1]) is not None,
-    "HBMS2": lambda t: len(t) == 8 and "." in t[0] and len(t[2]) == 1,
+    # HPVINV08 has answered with both 8 and 9 tokens (the 9-token form also fits
+    # HOP's shape), so this is only a diagnostic check, never a type.
+    "HBMS2": lambda t: len(t) in (8, 9) and "." in t[0] and len(t[2]) == 1,
     "HBMS3": lambda t: len(t) == 17 and re.fullmatch(r"\d{4}", t[0]) is not None,
     "HGRID": lambda t: len(t) == 10 and "." in t[0] and "." in t[1] and t[6][:1] in "+-",
     "HOP": lambda t: len(t) == 9 and "." in t[0] and "." in t[7] and "." not in t[3],
@@ -1254,6 +1393,24 @@ _CONTROL_WAIT_SEC = 3.0
 _CLAIMED = "claimed"
 
 
+def _expire_live_commands(conn: tcpstack.Connection, now: float) -> None:
+    """Drop token -> (command, sent_at, cycle) entries older than _LIVE_TOKEN_TTL_SEC.
+    Call with _SEND_LOCK held.
+
+    The in-flight place is freed earlier (_LIVE_REPLY_TIMEOUT_SEC), but the command
+    is kept until this TTL: a late answer inside the TTL is still typed by its token,
+    never by its shape. Past the TTL the answer is not decoded at all.
+    """
+    by_token = getattr(conn, "live_token_command", None)
+    if not by_token:
+        return
+    for token, item in list(by_token.items()):
+        sent_at = item[1] if isinstance(item, tuple) and len(item) > 1 else None
+        if sent_at is None or now - sent_at > _LIVE_TOKEN_TTL_SEC:
+            del by_token[token]
+            _live_note(conn, "token expired")
+
+
 def _inflight(conn: tcpstack.Connection, now: float) -> dict:
     """The commands sent and not answered yet ({"t": send time}), minus those older
     than _LIVE_REPLY_TIMEOUT_SEC, whose place is freed (counted for _live_report).
@@ -1267,6 +1424,7 @@ def _inflight(conn: tcpstack.Connection, now: float) -> dict:
             getattr(conn, "live_token_cycle", {}).pop(token, None)
             if token != _CLAIMED:
                 _live_note(conn, "answer missing")
+    _expire_live_commands(conn, now)
     return inflight
 
 
@@ -1353,18 +1511,14 @@ def _send_control_ci(ci_b64: str, conn: Optional[tcpstack.Connection] = None, cl
         return False
     if claim:
         _claim_dongle(conn)
-    # Remembered so _log_command_reply can say which command an answer is for.
+    # For display only: never use this to type an answer (with commands in flight it
+    # can name the other one). The answer's type comes from its own echoed token.
     frame = base64.b64decode(ci_b64)
     conn.last_command = frame[:-3].decode("ascii", errors="replace")
     # The dongle echoes "t" in its answer: the place it takes is freed by the answer
     # carrying it, and by no other (_live_answered).
     token = _random_token(8)
     conn.last_sent_token = token
-    if command:
-        by_token = getattr(conn, "live_token_command", None)
-        if by_token is None:
-            by_token = conn.live_token_command = {}
-        by_token[token] = command
     with _SEND_LOCK:
         inflight = getattr(conn, "live_inflight", None)
         if inflight is None:
@@ -1377,7 +1531,15 @@ def _send_control_ci(ci_b64: str, conn: Optional[tcpstack.Connection] = None, cl
         cycles = getattr(conn, "live_token_cycle", None)
         if cycles is None:
             cycles = conn.live_token_cycle = {}
-        cycles[token] = getattr(conn, "live_cycle", 0)
+        cycle = getattr(conn, "live_cycle", 0)
+        cycles[token] = cycle
+        if command:
+            by_token = getattr(conn, "live_token_command", None)
+            if by_token is None:
+                by_token = conn.live_token_command = {}
+            # Kept after the place is freed, until _LIVE_TOKEN_TTL_SEC, so a late
+            # answer can still be typed by its token.
+            by_token[token] = (command, sent_at, cycle)
     topic = f"dtu/{conn.dtu_id}/sub/service/dev_rpc"
     payload = json.dumps(
         {
@@ -1532,11 +1694,9 @@ def _probe_classify(command: str, envelope: dict):
         return "nak", text[:30]
     if base_command in _H_BLOCKS:
         expected = _H_BLOCKS[base_command]
-        typer = globals().get("_block_for_answer")
-        block = typer(base_command, raw) if callable(typer) else _h_block_of(raw)
-        if block == expected:
+        if _h_shape_fits(base_command, raw):
             return "ack", ""
-        return "mismatch", f"block={block or 'unknown'} expected={expected}"
+        return "mismatch", f"expected={expected}"
     if base_command == "QFLAG":
         return ("ack", "") if _QFLAG_RE.match(text) else ("mismatch", "not QFLAG")
     if base_command == "QPIWS":
@@ -1965,7 +2125,7 @@ def _send_full_poll(conn: tcpstack.Connection, now: float, live_interval: float)
         try:
             # Not claim: the live reads are off here, and the telemetry
             # thread must never block on a command from Home Assistant.
-            _send_control_ci(build_write_ci("QFLAG", ""), conn=conn, claim=False, sent_at=now)
+            _send_control_ci(build_write_ci("QFLAG", ""), conn=conn, claim=False, sent_at=now, command="QFLAG")
         except Exception as exc:
             log(f"[LOCAL CLOUD ERROR] QFLAG query failed: {exc}", level="error")
 

@@ -867,7 +867,9 @@ class TestMainsInputRangeFollowsTheSetting(_ParserTestCase):
                 mock.patch.dict(shared_state.LAST_STATE, {}, clear=False), \
                 mock.patch.object(parsers, "PENDING_PUBLISH", False):
             fakecloud._handle_publish(0x30, publish({"sa": "", "ct": [{"cn": "93VQ", "co": "KDEgMDYwDQ=="}]}), conn)
+            conn.live_token_command = {"x": ("PGFC006", 0.0, 1)}
             fakecloud._handle_publish(0x30, publish(co(b"(ACK9 \r")), conn)
+            conn.live_token_command = {"x": ("QFLAG", 0.0, 1)}
             fakecloud._handle_publish(0x30, publish(co(b"(EbuvxyDajkz8\x12\r")), conn)
             snapshot = shared_state.snapshot_state()
             pending = parsers.PENDING_PUBLISH
@@ -899,7 +901,7 @@ class TestMainsInputRangeFollowsTheSetting(_ParserTestCase):
             with mock.patch.dict(shared_state.LAST_STATE, {}, clear=True), \
                     mock.patch.object(fakecloud, "log") as log, \
                     mock.patch.object(parsers, "PENDING_PUBLISH", False):
-                fakecloud._log_command_reply(self._reply_envelope(self._pi30_frame(b"(" + letter)), conn)
+                fakecloud._log_command_reply(self._reply_envelope(self._pi30_frame(b"(" + letter)), conn, command="QMOD")
                 self.assertEqual(shared_state.snapshot_state()["mode"], label)
                 self.assertTrue(parsers.PENDING_PUBLISH)
             log.assert_not_called()
@@ -911,7 +913,7 @@ class TestMainsInputRangeFollowsTheSetting(_ParserTestCase):
         from src.siseli_local_bridge import state as shared_state
         conn = SimpleNamespace(last_command="PGFC006")
         with mock.patch.dict(shared_state.LAST_STATE, {}, clear=True), mock.patch.object(fakecloud, "log") as log:
-            fakecloud._log_command_reply(self._reply_envelope(self._pi30_frame(b"(ACK")), conn)
+            fakecloud._log_command_reply(self._reply_envelope(self._pi30_frame(b"(ACK")), conn, command="PGFC006")
             self.assertNotIn("mode", shared_state.snapshot_state())
         self.assertEqual(log.call_count, 1)
 
@@ -925,7 +927,7 @@ class TestMainsInputRangeFollowsTheSetting(_ParserTestCase):
         raised = b"0" * 4 + b"1" + b"0" * 10 + b"1" + b"0" * 16
         with mock.patch.dict(shared_state.LAST_STATE, {}, clear=True), mock.patch.object(fakecloud, "log") as log:
             for flags in (clear, clear, raised, raised):
-                fakecloud._log_command_reply(self._reply_envelope(self._pi30_frame(b"(" + flags)), conn)
+                fakecloud._log_command_reply(self._reply_envelope(self._pi30_frame(b"(" + flags)), conn, command="QPIWS")
             snapshot = shared_state.snapshot_state()
         self.assertEqual(snapshot["warning_count"], 2)
         self.assertEqual(snapshot["warning_flags"], raised.decode())
@@ -960,12 +962,11 @@ class TestMainsInputRangeFollowsTheSetting(_ParserTestCase):
     def _h_raw(self, command):
         return self._H_ANSWERS[command].encode("ascii") + b"\r"
 
-    def test_every_h_answer_is_identified_as_its_own_block(self):
+    def test_every_h_answer_matches_its_expected_shape(self):
         from src.siseli_local_bridge import fakecloud
         for command in self._H_ANSWERS:
             with self.subTest(command=command):
-                self.assertEqual(fakecloud._h_block_of(self._h_raw(command)), fakecloud._H_BLOCKS[command])
-        self.assertEqual(len(set(fakecloud._H_BLOCKS.values())), len(fakecloud._H_BLOCKS))
+                self.assertTrue(fakecloud._h_shape_fits(command, self._h_raw(command)))
 
     def test_a_line_that_is_not_one_of_the_blocks_is_never_decoded(self):
         from src.siseli_local_bridge import fakecloud
@@ -975,21 +976,42 @@ class TestMainsInputRangeFollowsTheSetting(_ParserTestCase):
             self._h_raw("HOP").replace(b"006.1", b"0061"),          # telltale token wrong
         ):
             with self.subTest(raw=raw):
-                self.assertIsNone(fakecloud._h_block_of(raw))
+                for command in fakecloud._H_BLOCKS:
+                    self.assertFalse(fakecloud._h_shape_fits(command, raw), command)
 
     def test_a_live_answer_is_typed_by_its_echoed_command_not_its_shape(self):
         """HPVINV08's HBMS2 answer carries nine tokens and fits the HOP shape, so
         shape typing published BMS cells as load power. The command echoed in the
-        reply's "t" is the type; the shape is only a fallback."""
+        reply's "t" is the only type; an unknown command is not decoded."""
         from src.siseli_local_bridge import fakecloud
         raw = b"(0000.0 0000.0 0 3510 0004 3402 0011 100.0 0000000000000000\r"
-        self.assertEqual(fakecloud._h_block_of(raw), "2l0E")
         self.assertEqual(fakecloud._block_for_answer("HBMS2", raw), "uxJp")
         self.assertEqual(fakecloud._block_for_answer("HOP", self._h_raw("HOP")), "2l0E")
-        self.assertEqual(
-            fakecloud._block_for_answer(None, raw),
-            fakecloud._h_block_of(raw),
-        )
+        self.assertIsNone(fakecloud._block_for_answer(None, raw))
+        self.assertIsNone(fakecloud._block_for_answer("QPIWS", raw))
+
+    def test_the_echoed_command_wins_over_last_command(self):
+        """With two commands in flight last_command can name the other one; the
+        answer's own token must win."""
+        from types import SimpleNamespace
+        from unittest import mock
+        from src.siseli_local_bridge import fakecloud
+        raw = b"(0000.0 0000.0 0 3510 0004 3402 0011 100.0 0000000000000000\r"
+        conn = SimpleNamespace(last_command="HOP")
+        with mock.patch.object(fakecloud, "_collect_live_block") as collect:
+            fakecloud._log_command_reply(self._reply_envelope(raw), conn, command="HBMS2")
+        collect.assert_called_once_with("uxJp", raw, conn)
+
+    def test_an_answer_without_a_token_is_not_decoded(self):
+        from types import SimpleNamespace
+        from unittest import mock
+        from src.siseli_local_bridge import fakecloud
+        conn = SimpleNamespace(last_command="HOP")
+        with mock.patch.object(fakecloud, "_collect_live_block") as collect, \
+                mock.patch.object(fakecloud, "log") as log:
+            fakecloud._log_command_reply(self._reply_envelope(self._h_raw("HOP")), conn, command=None)
+        collect.assert_not_called()
+        self.assertIn("not decoded", str(log.call_args))
 
     def _h_conn(self, expected, cycle=1):
         from types import SimpleNamespace
@@ -997,7 +1019,7 @@ class TestMainsInputRangeFollowsTheSetting(_ParserTestCase):
 
     def _feed(self, conn, command):
         from src.siseli_local_bridge import fakecloud
-        fakecloud._log_command_reply(self._reply_envelope(self._h_raw(command)), conn)
+        fakecloud._log_command_reply(self._reply_envelope(self._h_raw(command)), conn, command=command)
 
     def _blocks_of(self, parse_call):
         import base64
@@ -1244,6 +1266,29 @@ class TestMainsInputRangeFollowsTheSetting(_ParserTestCase):
             fakecloud._live_answered(conn, hop)
             self.assertEqual(len(conn.live_inflight), 2)
 
+    def test_a_late_answer_keeps_its_command_until_the_token_ttl(self):
+        """Freeing the in-flight place must not free the token->command entry: a
+        late answer inside the TTL is still typed by its token, and an answer past
+        the TTL is dropped rather than typed by shape."""
+        from types import SimpleNamespace
+        from unittest import mock
+        from src.siseli_local_bridge import fakecloud
+        conn = SimpleNamespace(
+            live_inflight={"t": 100.0},
+            live_token_cycle={"t": 7},
+            live_token_command={"t": ("HOP", 100.0, 7)},
+        )
+        with mock.patch.object(fakecloud, "log"):
+            fakecloud._inflight(conn, 100.0 + fakecloud._LIVE_REPLY_TIMEOUT_SEC + 0.1)
+        self.assertNotIn("t", conn.live_inflight)                 # the place is free
+        self.assertIn("t", conn.live_token_command)               # the command is not
+        self.assertEqual(fakecloud._take_live_command(conn, "t"), ("HOP", 7))
+
+        conn.live_token_command = {"t": ("HOP", 100.0, 7)}
+        with mock.patch.object(fakecloud, "log"):
+            fakecloud._expire_live_commands(conn, 100.0 + fakecloud._LIVE_TOKEN_TTL_SEC + 0.1)
+        self.assertNotIn("t", conn.live_token_command)            # past the TTL: gone
+
     def _answer(self, conn, token, command):
         """The dongle's answer to `command`, carrying its "t", through _handle_publish."""
         import base64
@@ -1252,6 +1297,8 @@ class TestMainsInputRangeFollowsTheSetting(_ParserTestCase):
         body = {"c": 5, "t": token, "s": "s", "i": 504, "e": 0,
                 "b": {"sa": "", "co": base64.b64encode(self._h_raw(command)).decode()}}
         from src.siseli_local_bridge import fakecloud
+        cycle = getattr(conn, "live_token_cycle", {}).get(token, getattr(conn, "live_cycle", 0))
+        conn.live_token_command = {token: (command, 0.0, cycle)}
         fakecloud._handle_publish(0x30, len(topic).to_bytes(2, "big") + topic + b"\x00" + json.dumps(body).encode(), conn)
 
     def test_the_next_round_starts_without_waiting_and_answers_keep_their_round(self):
@@ -3005,5 +3052,41 @@ class TestSettingsBackup(unittest.TestCase):
             self.assertEqual(sent, [(mqtt.control_command_topic("second_output_cutoff_soc"), b"35")])
         self.assertIn("save_inverter_settings", mqtt._CONTROL_BUTTONS)
         self.assertIn("restore_inverter_settings", mqtt._CONTROL_BUTTONS)
+
+
+class TestMonitorJournal(unittest.TestCase):
+    def test_monitoring_is_independent_of_monitor_only(self):
+        import os
+        import tempfile
+        from unittest import mock
+        from src.siseli_local_bridge import fakecloud
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "monitor.jsonl")
+            with mock.patch.object(fakecloud, "LIVE_MONITOR", True), \
+                    mock.patch.object(fakecloud, "LIVE_MONITOR_ONLY", False), \
+                    mock.patch.object(fakecloud, "_MONITOR_PATH", path):
+                fakecloud._monitor_write({"source": "fast", "command": "HOP"})
+            self.assertTrue(os.path.exists(path))
+            self.assertIn('"command":"HOP"', open(path, encoding="utf-8").read())
+
+    def test_monitor_rotation_keeps_the_configured_backups(self):
+        import os
+        import tempfile
+        from unittest import mock
+        from src.siseli_local_bridge import fakecloud
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "monitor.jsonl")
+            with mock.patch.object(fakecloud, "LIVE_MONITOR", True), \
+                    mock.patch.object(fakecloud, "_MONITOR_PATH", path), \
+                    mock.patch.object(fakecloud, "_MONITOR_MAX_BYTES", 100), \
+                    mock.patch.object(fakecloud, "_MONITOR_BACKUPS", 2):
+                for index in range(30):
+                    fakecloud._monitor_write({"source": "fast", "n": index})
+            self.assertTrue(os.path.exists(path))
+            self.assertTrue(os.path.exists(path + ".1"))
+            self.assertTrue(os.path.exists(path + ".2"))
+            self.assertFalse(os.path.exists(path + ".3"))
+
+
 if __name__ == "__main__":
     unittest.main()

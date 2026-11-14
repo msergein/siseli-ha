@@ -47,16 +47,14 @@ class TestProbeClassify(unittest.TestCase):
         self.assertEqual(note, "")
 
     def test_mismatch_when_another_block_arrives(self):
-        with mock.patch.object(fakecloud, "_block_for_answer", None, create=True):
-            outcome, note = fakecloud._probe_classify("HOP", _co(captures.BLOCK_WDRR_NO_GRID_FLOW))
+        outcome, note = fakecloud._probe_classify("HOP", _co(captures.BLOCK_WDRR_NO_GRID_FLOW))
         self.assertEqual(outcome, "mismatch")
-        self.assertIn("WdRR", note)
+        self.assertIn("2l0E", note)
 
 
-    def test_command_aware_typing_accepts_the_hbms2_variant(self):
+    def test_the_hbms2_nine_token_variant_is_accepted(self):
         raw = b"(0000.0 0000.0 0 3317 0003 3313 0002 100.0 0000000000000000\r"
-        with mock.patch.object(fakecloud, "_block_for_answer", lambda command, raw: "uxJp", create=True):
-            outcome, note = fakecloud._probe_classify("HBMS2", _co(raw))
+        outcome, note = fakecloud._probe_classify("HBMS2", _co(raw))
         self.assertEqual(outcome, "ack")
         self.assertEqual(note, "")
 
@@ -135,7 +133,7 @@ class TestProbeStateMachine(unittest.TestCase):
     def test_wrong_block_becomes_mismatch(self):
         with mock.patch.object(fakecloud, "LIVE_PROBE_REPEATS", 1), mock.patch.object(
             fakecloud, "_probe_write_json", return_value=None
-        ), mock.patch.object(fakecloud, "_block_for_answer", None, create=True):
+        ):
             fakecloud._probe_tick(self.conn, 0.0)
             fakecloud._probe_handle_reply(self.conn, "t1", _co(captures.BLOCK_WDRR_NO_GRID_FLOW))
             fakecloud._probe_tick(self.conn, 0.0)
