@@ -977,6 +977,20 @@ class TestMainsInputRangeFollowsTheSetting(_ParserTestCase):
             with self.subTest(raw=raw):
                 self.assertIsNone(fakecloud._h_block_of(raw))
 
+    def test_a_live_answer_is_typed_by_its_echoed_command_not_its_shape(self):
+        """HPVINV08's HBMS2 answer carries nine tokens and fits the HOP shape, so
+        shape typing published BMS cells as load power. The command echoed in the
+        reply's "t" is the type; the shape is only a fallback."""
+        from src.siseli_local_bridge import fakecloud
+        raw = b"(0000.0 0000.0 0 3510 0004 3402 0011 100.0 0000000000000000\r"
+        self.assertEqual(fakecloud._h_block_of(raw), "2l0E")
+        self.assertEqual(fakecloud._block_for_answer("HBMS2", raw), "uxJp")
+        self.assertEqual(fakecloud._block_for_answer("HOP", self._h_raw("HOP")), "2l0E")
+        self.assertEqual(
+            fakecloud._block_for_answer(None, raw),
+            fakecloud._h_block_of(raw),
+        )
+
     def _h_conn(self, expected, cycle=1):
         from types import SimpleNamespace
         return SimpleNamespace(dtu_id="1", live_cycle=cycle, h_expected=frozenset(expected))

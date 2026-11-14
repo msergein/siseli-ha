@@ -292,19 +292,21 @@ def _handle_publish(control: int, body: bytes, conn: tcpstack.Connection) -> byt
             # 2.6.80 the answers to the live commands (i=504) also arrive here, and
             # counting them made the stall check unable to ever fire.
             envelope = _extract_envelope(payload)
+            command = None
             if isinstance(envelope, dict) and envelope.get("i") == 504:
                 token = envelope.get("t")
                 token = str(token) if token is not None else None
                 # The round the answered command was sent in (2.7.00: rounds overlap,
                 # the next one starting while the last answers of this one are due).
                 conn.answer_cycle = getattr(conn, "live_token_cycle", {}).pop(token, None)
+                command = getattr(conn, "live_token_command", {}).pop(token, None)
                 _live_answered(conn, token)
             if isinstance(envelope, dict) and envelope.get("i") == 502:
                 conn.poll_reply_count = getattr(conn, "poll_reply_count", 0) + 1
                 conn.last_reply_ts = time.monotonic()
                 conn.poll_stall_logged = False
             try:
-                _log_command_reply(payload, conn)
+                _log_command_reply(payload, conn, command)
             finally:
                 conn.answer_cycle = None
 
@@ -502,7 +504,21 @@ def _apply_qpiws(flags: str, conn: tcpstack.Connection) -> None:
     _publish_live({"warning_count": len(active), "warning_flags": flags})
 
 
-def _log_command_reply(payload: bytes, conn: tcpstack.Connection) -> None:
+def _block_for_answer(command: Optional[str], raw: bytes) -> Optional[str]:
+    """The block an H answer carries, typed by the command it answers.
+
+    The dongle echoes the command's "t", so the command is known even when two
+    blocks share a shape. HPVINV08's HBMS2 answer carries nine tokens and fits the
+    HOP shape, which is exactly how BMS values were published as load power. The
+    shape is only a fallback for replies whose token was lost (or for non-H
+    commands), never the primary type.
+    """
+    if command in _H_BLOCKS:
+        return _H_BLOCKS[command]
+    return _h_block_of(raw)
+
+
+def _log_command_reply(payload: bytes, conn: tcpstack.Connection, command: Optional[str] = None) -> None:
     """Log the inverter's answer to a dev_rpc command ("(ACK9", "(NAKss", "^1",
     "^0", or a query's data). Telemetry replies carry a "ct" block list and are
     skipped; a command reply carries a single "co" field. The periodic QFLAG
@@ -529,7 +545,7 @@ def _log_command_reply(payload: bytes, conn: tcpstack.Connection) -> None:
         # same second as the minute's QFLAG would otherwise swap the labels.
         _apply_qflag(text, conn)
         return
-    block = _h_block_of(raw)
+    block = _block_for_answer(command, raw)
     if block is not None:
         _collect_live_block(block, raw, conn)
         return
@@ -1303,7 +1319,7 @@ def queue_readback(setting: str, during_restore: bool = False) -> None:
 
 
 def _send_control_ci(ci_b64: str, conn: Optional[tcpstack.Connection] = None, claim: bool = True,
-                     sent_at: Optional[float] = None) -> bool:
+                     sent_at: Optional[float] = None, command: Optional[str] = None) -> bool:
     """Send one dev_rpc command. `claim=False` is for the live reads, which keep
     their own place (poll_due_connections, which passes its clock as `sent_at`);
     every other command waits for a free place."""
@@ -1320,6 +1336,11 @@ def _send_control_ci(ci_b64: str, conn: Optional[tcpstack.Connection] = None, cl
     # The dongle echoes "t" in its answer: the place it takes is freed by the answer
     # carrying it, and by no other (_live_answered).
     token = _random_token(8)
+    if command:
+        by_token = getattr(conn, "live_token_command", None)
+        if by_token is None:
+            by_token = conn.live_token_command = {}
+        by_token[token] = command
     with _SEND_LOCK:
         inflight = getattr(conn, "live_inflight", None)
         if inflight is None:
@@ -1577,7 +1598,7 @@ def _send_live_reads(conn: tcpstack.Connection, now: float, live_interval: float
                 ci = base64.b64encode(f"{command}\r".encode("ascii")).decode()
             else:
                 ci = build_write_ci(command, "")
-            _send_control_ci(ci, conn=conn, claim=False, sent_at=now)
+            _send_control_ci(ci, conn=conn, claim=False, sent_at=now, command=command)
         except Exception as exc:
             log(f"[LOCAL CLOUD ERROR] {command} query failed: {exc}", level="error")
             break
