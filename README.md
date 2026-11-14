@@ -1,22 +1,32 @@
 # ☀️ Siseli Local Bridge for Home Assistant
 
-[![Siseli Local Bridge](https://img.shields.io/badge/version-2.7.00-blue.svg?label=Siseli%20Local%20Bridge)](siseli_local_bridge/CHANGELOG.md)
+**English** | [Русский](README.ru.md)
+
+[![Siseli Local Bridge](https://img.shields.io/badge/version-2.8.0-blue.svg?label=Siseli%20Local%20Bridge)](siseli_local_bridge/CHANGELOG.md)
 [![HA Add-on](https://img.shields.io/badge/Home%20Assistant-Add--on-green.svg)](https://www.home-assistant.io/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey.svg)](LICENSE)
 
 <img src="siseli_local_bridge/icon.png" alt="" width="140" align="right">
 
 A Home Assistant add-on that reads your Siseli-compatible solar inverter **locally** and
-publishes it to Home Assistant through MQTT auto-discovery. It runs in one of two modes:
+publishes it to Home Assistant through MQTT auto-discovery. It runs in one of three modes:
 
 - **Pass-through** — the dongle keeps talking to the vendor cloud and the official app
   keeps working; the add-on decodes the telemetry on its way.
 - **100% local** — the add-on **replaces the vendor cloud**: the dongle only talks to your
-  Home Assistant host, readings refresh every 15 seconds, and the inverter's settings
-  become Home Assistant controls. See [100% local mode](#100-local-mode).
+  Home Assistant host, and the inverter's settings become Home Assistant controls. See
+  [100% local mode](#100-local-mode).
+- **Hybrid relay** — this fork's mode: fast H-block reads stay local, while the dongle's
+  slow/cloud traffic is forwarded to the vendor cloud **as-is**. The official app keeps
+  working; the cloud slow stream is parsed for Home Assistant too. See
+  [Hybrid relay](#hybrid-relay-this-fork).
 
 **206 sensors across 7 devices**, 148 enabled on a fresh install, plus the controls of
 the 100% local mode. Entity names in English or French (`LANGUAGE` option).
+
+> **Tested deployment:** this fork has been tested as a Docker Compose deployment. The
+> Home Assistant add-on packaging path has **not** been tested in this fork — use it at
+> your own risk. See [Docker deployment](#docker-deployment).
 
 > **Acknowledgment:** a fork of [fadmaz/siseli-ha](https://github.com/fadmaz/siseli-ha)
 > and its **Siseli Inverter Bridge**, itself an expanded fork of
@@ -28,18 +38,156 @@ the 100% local mode. Entity names in English or French (`LANGUAGE` option).
 
 ---
 
+## Fork differences
+
+Compared with upstream `siseli-local-bridge`, this fork adds:
+
+- **Fast local H reads** (`LIVE_POLL_INTERVAL_SEC`, tested at 5 s) instead of relying on
+  the dongle's ~5-minute cache.
+- **Strict live typing by echoed token** — no shape fallback; unknown or expired tokens
+  are dropped and logged, never published as telemetry.
+- **Hybrid relay** (`UPSTREAM_RELAY`) — fast reads stay local, slow/cloud MQTT is
+  forwarded as-is to the vendor cloud.
+- **Always-on journal** (`monitor.jsonl`) with `cloud`, `dongle`, `fast` and `slow`
+  records and size-based rotation.
+- **HTTP bootstrap additions** — `gatherProtocol`, `syncTime` and an authenticated
+  upstream fallback for unknown `/dtu/` calls.
+- **HPVINV08 BMS support** — `dbXf`/`MzuA` aliases and the BMS current-direction fix.
+- **Diagnostic live probe** (`LIVE_PROBE_*`) and **Docker deployment** documentation.
+- **Russian README** and a tested Docker Compose path.
+
+Not yet verified in this fork:
+
+- the Home Assistant **add-on packaging path** (the add-on was inherited from upstream;
+  only Docker has been tested);
+- long-running stability and vendor-side behavior of hybrid relay;
+- the 38 sensors that remain `Unknown` (see [Known limitations](#known-limitations)).
+
+---
+
 ## Install
 
 **Settings → Add-ons → Add-on Store → ⋮ → Repositories**, then add:
 
 ```
-https://github.com/siselilocal/siseli-ha
+https://github.com/msergein/siseli-ha
 ```
 
 Install **Siseli Local Bridge** (and **Network IP Alias** if you want the 100% local
 mode), then follow **[the documentation](siseli_local_bridge/DOCS.md)** — requirements,
 every configuration option, network setup and troubleshooting. Home Assistant renders
 that same page on the add-on's **Documentation** tab once it is installed.
+
+---
+
+## Docker deployment
+
+The bridge can also run as a normal Docker container on a Linux host. It needs
+`network_mode: host` plus `NET_ADMIN`/`NET_RAW`, because it performs ARP interception and
+raw packet capture. Docker Desktop on macOS/Windows cannot provide this.
+
+Build the image from the repository root:
+
+```bash
+docker build -t siseli-local-bridge:local ./siseli_local_bridge
+```
+
+Example `docker-compose.yml` (Mosquitto is assumed to be running already; point
+`MQTT_HOST` at it):
+
+```yaml
+services:
+  siseli-local-bridge:
+    build:
+      context: ./siseli_local_bridge
+      dockerfile: Dockerfile
+    image: siseli-local-bridge:local
+    container_name: siseli-local-bridge
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    security_opt:
+      - apparmor=unconfined
+    entrypoint: []
+    command:
+      - python3
+      - -u
+      - -m
+      - src.siseli_local_bridge.core
+    env_file:
+      - .env
+    volumes:
+      - ./data:/data
+```
+
+Create `.env` from the example below and **do not commit it**:
+
+```dotenv
+# MQTT broker (Mosquitto)
+MQTT_HOST=127.0.0.1
+MQTT_PORT=1883
+MQTT_USER=your-mqtt-user
+MQTT_PASSWORD=your-mqtt-password
+
+# Inverter and network
+INVERTER_IP=192.168.1.50
+ROUTER_IP=192.168.1.1
+INVERTER_MAC=aa:bb:cc:dd:ee:ff
+ROUTER_MAC=11:22:33:44:55:66
+SNIFF_IFACE=eth0
+
+# Local cloud on a spare host address
+LOCAL_CLOUD_IP=192.168.1.250
+LOCAL_CLOUD_PORT=1883
+HTTP_STUB_PORT=80
+HTTP_STUB_REAL_IPS=8.212.16.60
+DNS_SPOOF_DOMAIN=broker.mqtt.solar.siseli.com,dtu.access.solar.siseli.com
+MQTT_BROKER_HOSTNAME=hongkong.broker.mqtt.solar.siseli.com
+
+# Vendor cloud, for hybrid relay / pass-through
+TARGET_HOST=8.212.18.157
+TARGET_PORT=1883
+AUTO_INTERCEPT=true
+FORWARD_ALL_INVERTER_TRAFFIC=false
+
+# Fast local reads and journal
+TELEMETRY_POLL_INTERVAL_SEC=0
+LIVE_POLL_INTERVAL_SEC=5
+LIVE_MAX_INFLIGHT=1
+LIVE_MONITOR=true
+LIVE_MONITOR_ONLY=false
+MONITOR_MAX_BYTES=20971520
+MONITOR_BACKUPS=5
+
+# false = 100% local, true = hybrid relay
+UPSTREAM_RELAY=false
+```
+
+For **pass-through**, leave `LOCAL_CLOUD_IP` empty and keep `UPSTREAM_RELAY=false`.
+
+Create the data directory and start:
+
+```bash
+mkdir -p data
+docker compose up -d --build
+docker compose logs -f siseli-local-bridge
+```
+
+For **100% local** or **hybrid relay**, add the local-cloud address to the host interface
+before starting:
+
+```bash
+sudo ip addr add 192.168.1.250/24 dev eth0
+```
+
+Remove it with `sudo ip addr del 192.168.1.250/24 dev eth0` when returning to
+pass-through. On Home Assistant OS, use the **Network IP Alias** add-on instead of this
+manual command.
+
+For **hybrid relay**, set `UPSTREAM_RELAY=true` and keep `LOCAL_CLOUD_IP` set. The
+bridge will forward the dongle's cloud traffic as-is and keep fast H reads local.
 
 ---
 
@@ -61,6 +209,73 @@ observes, decodes, and relays.
 
 **What this means in practice:** if the add-on stops, your inverter keeps working and the
 vendor app keeps working. You lose the Home Assistant sensors, nothing else.
+
+---
+
+## Hybrid relay (this fork)
+
+This fork adds a third mode for installations that still need the vendor cloud:
+
+```text
+                 fast H-block reads (local)
+inverter dongle <────────────────────────────> bridge <──> Home Assistant
+       │                                           │
+       └──────── slow/cloud MQTT as-is ────────────┴──> vendor cloud
+```
+
+- The dongle still talks to the real cloud through the bridge. The official web portal and
+  Android app keep working.
+- The bridge reads `HOP`, `HGRID`, `HPV`, `HBAT`, `HBMS1`, `HBMS2`, `HBMS3`, `HTEMP`,
+  `HSTS`, `HGEN` and `HPVB` locally every `LIVE_POLL_INTERVAL_SEC` seconds.
+- Slow/cloud traffic is forwarded **unchanged**. The bridge parses the slow payloads for
+  Home Assistant; the cloud's own replies are forwarded back to the dongle.
+- Local fast commands and their replies are identified by their echoed `t` token and are
+  **never sent to the cloud**. Settings writes are tracked the same way.
+- Monitoring records both sides in `monitor.jsonl`: `source=cloud` /
+  `direction=cloud->dongle` and `source=dongle` / `direction=dongle->cloud`.
+
+Enable it with:
+
+```yaml
+UPSTREAM_RELAY: true
+LOCAL_CLOUD_IP: 192.168.1.250
+LIVE_POLL_INTERVAL_SEC: 5
+LIVE_MAX_INFLIGHT: 1
+LIVE_MONITOR: true
+LIVE_MONITOR_ONLY: false
+TELEMETRY_POLL_INTERVAL_SEC: 0
+```
+
+**Status:** experimental. It has been verified against a live account: the cloud accepted
+the session, the web/app showed the device online, a manual “refresh” produced a cloud
+`dev_rpc` (`i=501`), the dongle reply (`i=502`) was forwarded back, and the slow payload
+was parsed for Home Assistant. The cloud sees the Home Assistant host's IP, not the
+dongle's, and uses the same MQTT client id; this may violate the vendor's terms or trigger
+server-side session handling. Use it at your own risk and keep the rollback path below.
+
+### Rollback to 100% local
+
+```yaml
+UPSTREAM_RELAY: false
+```
+
+Restart the add-on and power-cycle the dongle if it does not reconnect. The bridge then
+keeps everything local, and the vendor app shows the inverter offline.
+
+### Live reads and monitoring
+
+- `LIVE_POLL_INTERVAL_SEC` — fast local cycle interval (seconds; `0` disables it).
+- `LIVE_MAX_INFLIGHT` — how many local reads may wait for an answer (the tested deployment
+  uses `1`; the code default is `2`).
+- `LIVE_MONITOR_ONLY` — when `true`, fast answers are written to the journal but not
+  published to Home Assistant. Slow data remains the reference.
+- `LIVE_MONITOR` — always-on journal, independent of `LIVE_MONITOR_ONLY` (default `true`).
+- `MONITOR_MAX_BYTES` / `MONITOR_BACKUPS` — size-based rotation for `monitor.jsonl`
+  (default 20 MiB × 5 backups).
+
+The journal is diagnostic: it stores the command, token, envelope error and raw answer
+for each fast reply, plus the parsed slow snapshot. It rotates automatically and is safe
+to keep on permanently.
 
 ---
 
@@ -97,14 +312,8 @@ Anything using the Siseli IoT cloud platform, which includes inverters sold as:
 Solar of Things · LUMINOUS NEO · SUN WISE · Queen Tech · LIB Life · Sun house · LeiLing ·
 SunSaviour · ECOmenic · HC solar · 沐能低碳 · PowMr · Taico
 
-**Verified in detail:**
-
-- **Pass-through decoding** — upstream's reference device: `HPVINV04`, firmware `0010.11`,
-  two inverters in parallel with a 32-cell battery bank. Its captures are byte-faithful
-  fixtures in the test suite, and the decoded values are checked against the official app.
-- **100% local mode and the controls** — a Datouboss 11 kW (`HPVINV04`, firmware
-  `0010.14`) with a WattCycle 48 V battery; see
-  [Hardware used for the 100% local tests](#hardware-used-for-the-100-local-tests).
+The configuration verified in this fork is listed under
+[Verified hardware](#verified-hardware).
 
 Other brands on that list are reported to work but are not covered by captures. If you
 have one, a debug capture is the single most useful contribution you can make — see
@@ -116,11 +325,11 @@ have one, a debug capture is the single most useful contribution you can make �
 
 ## 100% local mode
 
-With `LOCAL_CLOUD_IP` set, the add-on **impersonates the vendor cloud** on a spare IP
-address of your Home Assistant host. The dongle never reaches the internet, the bridge
-asks it for a full reading every 15 seconds instead of waiting for its own 5-minute push,
-and the inverter's settings become Home Assistant controls. Pass-through stays the default
-(`LOCAL_CLOUD_IP` left empty).
+With `LOCAL_CLOUD_IP` set and `UPSTREAM_RELAY` off, the add-on **impersonates the vendor
+cloud** on a spare IP address of your Home Assistant host. The dongle never reaches the
+internet; the bridge reads the fast H blocks every `LIVE_POLL_INTERVAL_SEC` seconds and
+uses the dongle's own slow push as the reference. The inverter's settings become Home
+Assistant controls. Pass-through stays the default (`LOCAL_CLOUD_IP` left empty).
 
 **Trade-off of the 100% local mode:** the vendor cloud no longer hears from the dongle, so
 the official app shows the inverter offline. To use the app again, go back to
@@ -141,8 +350,9 @@ The full option reference, with every setting explained, is on the add-on's
    "which MQTT broker should I use"). It also answers the vendor's HTTP address the
    dongle has cached, since some dongles skip DNS for it.
 4. The dongle then connects to a **small MQTT broker built into the bridge** on the extra
-   address. The bridge acknowledges its messages as the real cloud would, and requests a
-   full reading every `TELEMETRY_POLL_INTERVAL_SEC` seconds.
+   address. The bridge acknowledges its messages as the real cloud would. It reads the
+   fast H blocks every `LIVE_POLL_INTERVAL_SEC` seconds; the optional full poll is
+   controlled separately by `TELEMETRY_POLL_INTERVAL_SEC` (`0` disables it).
 5. An **nftables rule** stops the host's own services (the Mosquitto add-on, for example)
    from answering on the extra address, so only the bridge does.
 6. Decoded values go to **your** MQTT broker, and Home Assistant picks them up through
@@ -160,7 +370,7 @@ The addresses below are **examples**; use your own.
 3. Add this repository (**Settings → Add-ons → Add-on Store → ⋮ → Repositories**):
 
    ```
-   https://github.com/siselilocal/siseli-ha
+   https://github.com/msergein/siseli-ha
    ```
 
 4. Install **Network IP Alias** and give it the free address. On a Raspberry Pi running
@@ -187,7 +397,9 @@ The addresses below are **examples**; use your own.
    HTTP_STUB_REAL_IPS: 8.212.16.60
    DNS_SPOOF_DOMAIN: broker.mqtt.solar.siseli.com,dtu.access.solar.siseli.com
    MQTT_BROKER_HOSTNAME: hongkong.broker.mqtt.solar.siseli.com
-   TELEMETRY_POLL_INTERVAL_SEC: 15
+   TELEMETRY_POLL_INTERVAL_SEC: 0
+   LIVE_POLL_INTERVAL_SEC: 5
+   LIVE_MAX_INFLIGHT: 1
    FORWARD_ALL_INVERTER_TRAFFIC: false
    ```
 
@@ -195,7 +407,7 @@ The addresses below are **examples**; use your own.
    for both.
 7. **Power-cycle the WiFi dongle.** The DNS answers and the HTTP bootstrap only happen
    when it boots; until then it stays connected to the real cloud.
-8. Within a minute the entities appear and refresh every 15 seconds. The controls are on
+8. Within a minute the entities appear and refresh every few seconds. The controls are on
    the **Siseli Local Inverter 1** device, in its **Configuration** card.
 
 > **Tip — faster connection: redirect the two names in your router's DNS.** If your router
@@ -277,18 +489,18 @@ To keep the inverter's clock right, press **Sync Inverter Clock** from a daily a
   "Control Parameters To Default Value" (factory reset of every setting) and "Reset PV
   Energy Storage".
 
-### Hardware used for the 100% local tests
+### Verified hardware
 
 | Part | Model |
 |---|---|
-| Inverter | Datouboss 11 kW (manual 4811B), model code `HPVINV04`, firmware `0010.14`, 48 V battery system, 240 V / 50 Hz output |
-| WiFi dongle | RWB1 (Solar of Things), firmware `V1.44.5_SolarV67` |
-| Battery | WattCycle LiFePO4 3U rack server battery, 48 V 100 Ah (16 cells), BMS on the inverter's Growatt (GRO) protocol |
-| Home Assistant host | Raspberry Pi 4, Home Assistant OS, Mosquitto broker add-on, Network IP Alias add-on on `end0` |
-| PV | one string on PV1 |
+| Inverter | Easun SMT 6.2KW, model code `HPVINV08`, firmware `0020.05`, 48 V battery system, 230 V / 50 Hz output |
+| WiFi dongle | RWB1 (Solar of Things), `V1.44.5_SolarV67`-class firmware |
+| Battery | 48 V LiFePO4 bank, 100 Ah configured, BMS reported over the inverter's BMS link |
+| Home Assistant host | x86_64 Linux host, Home Assistant 2026.9.4, Mosquitto broker |
+| PV | one active string on PV1 (PV2 may be present but idle) |
 
-Other devices that use the same cloud should behave the same way, but only this setup has
-been tested in 100% local mode. Reports from other hardware are welcome.
+Other devices that use the same cloud should behave the same way, but only this
+configuration has been tested. Reports from other hardware are welcome.
 
 ### Going back to pass-through
 
@@ -307,6 +519,8 @@ no local connection to send them on, and the sensors fall back to the dongle's o
 
 Development setup, test conventions, how to add a capture from your own inverter, and the
 release checklist are in [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+The code and documentation in this fork were written with assistance from DeepSeek.
 
 Release history is in [`siseli_local_bridge/CHANGELOG.md`](siseli_local_bridge/CHANGELOG.md), which
 Home Assistant also renders on the add-on's **Changelog** tab.

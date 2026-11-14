@@ -50,11 +50,17 @@ from .config import (
     MAX_MQTT_PACKET,
     LOG_MQTT_TOPICS,
     LOG_PACKETS,
+    LIVE_MAX_INFLIGHT,
+    LIVE_MONITOR,
+    LIVE_MONITOR_ONLY,
     LOG_UNPARSED_PUBLISH,
+    MONITOR_BACKUPS,
+    MONITOR_MAX_BYTES,
     STATE_CACHE_FILE,
     TARGET_HOST,
     TARGET_PORT,
     TELEMETRY_POLL_INTERVAL_SEC,
+    UPSTREAM_RELAY,
 )
 from .loggers import log, log_kv, log_payload_preview
 try:
@@ -76,19 +82,16 @@ LIVE_PROBE_MAX_CONSECUTIVE_MISSING = 10
 #: Always-on diagnostic journal of fast live answers and slow reference snapshots.
 #: LIVE_MONITOR_ONLY is independent: it keeps the fast answers out of state/HA while
 #: still writing this journal. Rotated by size, so a long run cannot fill /data.
-LIVE_MONITOR = os.getenv("LIVE_MONITOR", "1").strip().lower() in ("1", "true", "yes", "on")
-LIVE_MONITOR_ONLY = os.getenv("LIVE_MONITOR_ONLY", "0").strip().lower() in ("1", "true", "yes", "on")
 #: Hybrid relay: terminate the dongle's MQTT session locally, open a second TCP
 #: connection to the real vendor cloud, and pass all non-local frames through it.
 #: Cloud frames are forwarded to the dongle unchanged; dongle telemetry is parsed
 #: for HA and forwarded upstream. The bridge's own fast dev_rpc commands/replies
 #: are identified by their token map and never go to the cloud.
-UPSTREAM_RELAY = os.getenv("UPSTREAM_RELAY", "0").strip().lower() in ("1", "true", "yes", "on")
 _UPSTREAM_CONNECT_TIMEOUT_SEC = float(os.getenv("UPSTREAM_CONNECT_TIMEOUT_SEC", "8") or 8)
 _UPSTREAM_IO_TIMEOUT_SEC = 1.0
 _MONITOR_PATH = os.path.join(os.path.dirname(STATE_CACHE_FILE) or "/data", "monitor.jsonl")
-_MONITOR_MAX_BYTES = int(os.getenv("MONITOR_MAX_BYTES", str(20 * 1024 * 1024)) or 20 * 1024 * 1024)
-_MONITOR_BACKUPS = max(1, int(os.getenv("MONITOR_BACKUPS", "5") or 5))
+_MONITOR_MAX_BYTES = MONITOR_MAX_BYTES
+_MONITOR_BACKUPS = MONITOR_BACKUPS
 _MONITOR_LOCK = threading.Lock()
 _MONITOR_KEYS = (
     "grid_v", "grid_hz", "mains_power_w", "load_w", "load_pct", "out_v", "out_hz",
@@ -1088,7 +1091,7 @@ _QFLAG_INTERVAL_SEC = 60
 #: (conn.live_inflight). A command not answered within _LIVE_REPLY_TIMEOUT_SEC frees its
 #: place; a command from Home Assistant takes the next free place (_claim_dongle).
 LIVE_POLL_MIN_INTERVAL_SEC = 1
-_LIVE_MAX_INFLIGHT = max(1, int(os.getenv("LIVE_MAX_INFLIGHT", "2") or 2))
+_LIVE_MAX_INFLIGHT = LIVE_MAX_INFLIGHT
 #: A place in flight is freed after this, so a missing answer cannot stall the
 #: live cycle. This is a pacing timeout, not the token lifetime: the token->command
 #: entry is kept for _LIVE_TOKEN_TTL_SEC, so an answer arriving after the place was

@@ -2,10 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [2.8.0] - 2026-11-14
+
+Fork release based on upstream `2.7.00`.
 
 ### Added
 
+- **Hybrid upstream relay (`UPSTREAM_RELAY`).** The dongle's slow/cloud MQTT traffic is
+  forwarded to the real vendor cloud as-is, while fast H-block reads stay local. The
+  official portal and app keep working; slow payloads are still parsed for Home
+  Assistant. Experimental and opt-in.
+- **Always-on diagnostic journal (`LIVE_MONITOR`, `monitor.jsonl`).** Fast and slow
+  readings, cloud/dongle frames and their direction are recorded with size-based
+  rotation (`MONITOR_MAX_BYTES`, `MONITOR_BACKUPS`). `LIVE_MONITOR_ONLY` keeps fast
+  values out of Home Assistant while still journaling them.
+- **Strict token typing for live answers.** A live reply is typed only by the command
+  echoed in its `t` token; unknown or expired tokens are dropped and logged, never
+  decoded by shape. The token→command entry survives for 60 s after the in-flight slot
+  is freed.
+- **Configurable live in-flight limit (`LIVE_MAX_INFLIGHT`).** The tested deployment
+  uses `1`; the code default is `2`.
+- **HPVINV08 BMS aliases.** `dbXf`/`MzuA` are decoded with the same cell/capacity
+  decoders as `v09K`/`uxJp`.
+- **HTTP bootstrap additions.** `gatherProtocol`, `syncTime` and an authenticated
+  upstream fallback for unknown `/dtu/` calls.
 - **Diagnostic live command probe (`LIVE_PROBE_*`).** In 100% local mode,
   `LIVE_PROBE_COMMANDS` sends each configured H/PI30 read `LIVE_PROBE_REPEATS` times
   (default 50) with a configurable gap and inflight limit, replacing the normal live
@@ -24,6 +44,11 @@ All notable changes to this project will be documented in this file.
   keeps `battery_status`, the calculated battery charge/discharge power and energy,
   and the two BMS current sensors from reporting charge while the battery discharges
   (and the reverse). The swap is reported once as `[BMS CURRENT DIRECTION]`.
+
+### Notes
+
+- This fork has been tested as a Docker Compose deployment. The Home Assistant add-on
+  packaging path has not been tested in this fork.
 
 ## [2.7.00] - 2026-10-06
 

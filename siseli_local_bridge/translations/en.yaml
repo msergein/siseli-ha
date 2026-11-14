@@ -50,6 +50,24 @@ configuration:
   LIVE_PROBE_INFLIGHT:
     name: 'Live Probe Inflight'
     description: 'How many probe commands may be with the dongle at once: 1 (default) or 2. Use 1 for the first pass.'
+  UPSTREAM_RELAY:
+    name: 'Hybrid Upstream Relay'
+    description: 'EXPERIMENTAL. Forward the dongle slow/cloud MQTT traffic to the real vendor cloud as-is, while keeping fast H-block reads local. The official portal and app keep working. Requires Local Cloud IP. The cloud sees this host IP and the same MQTT client id.'
+  LIVE_MAX_INFLIGHT:
+    name: 'Live Reads Inflight'
+    description: 'How many local live reads may wait for an answer at once. The tested deployment uses 1; the code default is 2.'
+  LIVE_MONITOR:
+    name: 'Live Monitor Journal'
+    description: 'Always write monitor.jsonl with fast and slow readings. Independent of Live Monitor Only.'
+  LIVE_MONITOR_ONLY:
+    name: 'Monitor Only (No Fast Publish)'
+    description: 'Write fast answers to the journal but do not publish them to Home Assistant. Slow data remains the reference.'
+  MONITOR_MAX_BYTES:
+    name: 'Monitor Rotation Size (Bytes)'
+    description: 'Rotate monitor.jsonl after this many bytes (default 20 MiB).'
+  MONITOR_BACKUPS:
+    name: 'Monitor Backups'
+    description: 'How many rotated monitor.jsonl files to keep (default 5).'
   INVERTER_IP:
     name: 'Inverter IP Address'
     description: 'The local IPv4 address of your Siseli-compatible inverter (e.g. 192.168.1.139).'

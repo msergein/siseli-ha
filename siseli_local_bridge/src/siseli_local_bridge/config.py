@@ -87,6 +87,14 @@ LIVE_PROBE_REPEATS = int(os.getenv("LIVE_PROBE_REPEATS", "50") or "50")
 LIVE_PROBE_GAP_SEC = float(os.getenv("LIVE_PROBE_GAP_SEC", "2.0") or "2.0")
 LIVE_PROBE_INFLIGHT = int(os.getenv("LIVE_PROBE_INFLIGHT", "1") or "1")
 
+# Fork additions: hybrid relay and the always-on live journal.
+UPSTREAM_RELAY = os.getenv("UPSTREAM_RELAY", "0").strip().lower() in ("1", "true", "yes", "on")
+LIVE_MAX_INFLIGHT = max(1, int(os.getenv("LIVE_MAX_INFLIGHT", "2") or 1))
+LIVE_MONITOR = os.getenv("LIVE_MONITOR", "1").strip().lower() in ("1", "true", "yes", "on")
+LIVE_MONITOR_ONLY = os.getenv("LIVE_MONITOR_ONLY", "0").strip().lower() in ("1", "true", "yes", "on")
+MONITOR_MAX_BYTES = int(os.getenv("MONITOR_MAX_BYTES", str(20 * 1024 * 1024)) or 20 * 1024 * 1024)
+MONITOR_BACKUPS = max(1, int(os.getenv("MONITOR_BACKUPS", "5") or 5))
+
 # Comma-separated, each suffix-matched rather than an exact hostname: the vendor's
 # own broker name observed in a real capture was "hongkong.broker.mqtt.solar.
 # siseli.com" (2026-09-11), a region-prefixed subdomain, so matching only that

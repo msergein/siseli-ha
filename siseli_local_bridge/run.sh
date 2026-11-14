@@ -22,6 +22,13 @@ export LIVE_PROBE_REPEATS="$(bashio::config 'LIVE_PROBE_REPEATS' '50')"
 export LIVE_PROBE_GAP_SEC="$(bashio::config 'LIVE_PROBE_GAP_SEC' '2.0')"
 export LIVE_PROBE_INFLIGHT="$(bashio::config 'LIVE_PROBE_INFLIGHT' '1')"
 
+export UPSTREAM_RELAY="$(bashio::config 'UPSTREAM_RELAY' 'false')"
+export LIVE_MAX_INFLIGHT="$(bashio::config 'LIVE_MAX_INFLIGHT' '2')"
+export LIVE_MONITOR="$(bashio::config 'LIVE_MONITOR' 'true')"
+export LIVE_MONITOR_ONLY="$(bashio::config 'LIVE_MONITOR_ONLY' 'false')"
+export MONITOR_MAX_BYTES="$(bashio::config 'MONITOR_MAX_BYTES' '20971520')"
+export MONITOR_BACKUPS="$(bashio::config 'MONITOR_BACKUPS' '5')"
+
 export INVERTER_IP="$(bashio::config 'INVERTER_IP')"
 export ROUTER_IP="$(bashio::config 'ROUTER_IP')"
 export INVERTER_MAC="$(bashio::config 'INVERTER_MAC' '')"

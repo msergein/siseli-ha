@@ -3,9 +3,15 @@
 Full reference for installing, configuring and troubleshooting the add-on.
 
 This page is rendered by Home Assistant on the add-on's **Documentation** tab, and is
-also readable [on GitHub](https://github.com/siselilocal/siseli-ha/blob/main/siseli_local_bridge/DOCS.md).
+also readable [on GitHub](https://github.com/msergein/siseli-ha/blob/main/siseli_local_bridge/DOCS.md).
 For what the add-on is and how it decodes telemetry, see the
-[project README](https://github.com/siselilocal/siseli-ha).
+[project README](https://github.com/msergein/siseli-ha).
+
+> **Fork note:** the current fork has been tested as a Docker Compose deployment. The
+> Home Assistant add-on packaging path has **not** been tested in this fork. Several
+> options below (`UPSTREAM_RELAY`, `LIVE_MONITOR*`, `MONITOR_*`) are exposed for the
+> Docker deployment and are inherited by the add-on schema; verify them on your own
+> installation before relying on them.
 
 ## Contents
 
@@ -44,7 +50,7 @@ You will need that username and password in step 3.
 **Settings → Add-ons → Add-on Store → ⋮ → Repositories**, then add:
 
 ```
-https://github.com/siselilocal/siseli-ha
+https://github.com/msergein/siseli-ha
 ```
 
 ### 3. Install and configure
@@ -130,6 +136,12 @@ in step 3 above.
 | `LIVE_PROBE_REPEATS` | `50` | Repeats per probe command |
 | `LIVE_PROBE_GAP_SEC` | `2.0` | Pause between probe batches; raise to 2.5–3 s if the 2400 baud link loses answers |
 | `LIVE_PROBE_INFLIGHT` | `1` | Probe commands with the dongle at once: `1` (first pass) or `2` |
+| `UPSTREAM_RELAY` | `false` | Hybrid relay: fast H reads stay local, the dongle's slow/cloud traffic is forwarded to the real vendor cloud. Requires `LOCAL_CLOUD_IP`. Experimental — see [Hybrid relay](#hybrid-relay) |
+| `LIVE_MAX_INFLIGHT` | `2` | How many local live reads may be waiting for an answer at once. The tested deployment uses `1`; the code default is `2` |
+| `LIVE_MONITOR` | `true` | Always write the diagnostic journal `monitor.jsonl`, independent of `LIVE_MONITOR_ONLY` |
+| `LIVE_MONITOR_ONLY` | `false` | Write fast answers to the journal but keep them out of Home Assistant. Slow data remains the reference |
+| `MONITOR_MAX_BYTES` | `20971520` | Rotate `monitor.jsonl` after this many bytes (20 MiB) |
+| `MONITOR_BACKUPS` | `5` | Number of rotated monitor files to keep |
 
 These three interact, and the add-on **refuses to start** if they contradict each other:
 
@@ -206,8 +218,8 @@ identical.
 
 For a value-by-value map against the vendor portal — every block, every token position,
 and the exact list of fields the bridge cannot yet decode — see
-[`sensor_mapping_verified.md`](https://github.com/siselilocal/siseli-ha/blob/main/sensor_mapping_verified.md). An earlier map is kept at
-[`sensor_mapping.md`](https://github.com/siselilocal/siseli-ha/blob/main/sensor_mapping.md).
+[`sensor_mapping_verified.md`](https://github.com/msergein/siseli-ha/blob/main/sensor_mapping_verified.md). An earlier map is kept at
+[`sensor_mapping.md`](https://github.com/msergein/siseli-ha/blob/main/sensor_mapping.md).
 
 ---
 
@@ -398,6 +410,46 @@ power-cycle the dongle.
 
 ---
 
+## Hybrid relay
+
+`UPSTREAM_RELAY: true` keeps the vendor cloud in the loop while fast H-block reads stay
+local:
+
+```text
+inverter dongle <-> bridge <-> Home Assistant
+                       |
+                       +---- slow/cloud MQTT as-is ----> vendor cloud
+```
+
+- The dongle's CONNECT/SUBSCRIBE/PUBLISH traffic is forwarded to `TARGET_HOST:TARGET_PORT`
+  unchanged; cloud replies are forwarded back.
+- The bridge's own fast H commands are identified by their echoed `t` token and their
+  replies never go to the cloud.
+- Slow dongle/cloud payloads are parsed for Home Assistant.
+- `monitor.jsonl` records `source=cloud` (`cloud->dongle`) and `source=dongle`
+  (`dongle->cloud`) entries.
+
+Recommended options:
+
+```yaml
+LOCAL_CLOUD_IP: 192.168.1.250
+UPSTREAM_RELAY: true
+LIVE_POLL_INTERVAL_SEC: 5
+LIVE_MAX_INFLIGHT: 1
+LIVE_MONITOR: true
+LIVE_MONITOR_ONLY: false
+TELEMETRY_POLL_INTERVAL_SEC: 0
+```
+
+The cloud sees the Home Assistant host's IP, not the dongle's, and the same MQTT client
+id. This may violate the vendor's terms or trigger server-side session handling. The
+mode is experimental: verify the web portal and app before relying on it.
+
+To return to 100% local, set `UPSTREAM_RELAY: false` and restart. If the dongle does not
+reconnect, power-cycle it.
+
+---
+
 ## Troubleshooting
 
 ### The log says packet capture stopped
@@ -490,7 +542,7 @@ over the blocks actually verifies against the bytes on the wire — so it is evi
 than a guess. `body_shapes` breaks down a mixed payload; a device whose data blocks are one
 family and whose acknowledgements are another will show both.
 
-Please open an [unsupported inverter issue](https://github.com/siselilocal/siseli-ha/issues/new?template=unsupported_inverter.yml)
+Please open an [unsupported inverter issue](https://github.com/msergein/siseli-ha/issues/new?template=unsupported_inverter.yml)
 with that line and the `[BLOCK RAW]` output described below. Adding a protocol is real
 work, but it starts with a capture.
 
@@ -546,7 +598,7 @@ inverter's choice, made by the battery type.
 
 Set **Debug Flags** to `blocks` and `unparsed_publish`, and **Log Level** to `info`, for
 about two minutes — then turn them back off, because the output is per-packet. Open an
-issue with the [unsupported inverter template](https://github.com/siselilocal/siseli-ha/blob/main/.github/ISSUE_TEMPLATE/unsupported_inverter.yml)
+issue with the [unsupported inverter template](https://github.com/msergein/siseli-ha/blob/main/.github/ISSUE_TEMPLATE/unsupported_inverter.yml)
 and attach the `[BLOCK RAW]` lines.
 
 > **Scrub your log before posting it.** The `topic=` values contain your device serial.
