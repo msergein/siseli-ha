@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.8.1] - 2026-11-14
+
+### Added
+
+- **`HTTP_BOOTSTRAP_MODE` for hybrid relay.** Selects who answers the dongle's
+  boot-time HTTP calls: `local`, `cloud`, or `cloud_then_local`. The last mode lets the
+  vendor cloud receive the check-in/gather-protocol handshake (fixing
+  `Gather protocol version not exists` / `Energy flow rule not exists`) while keeping
+  `/dtu/servers/mqtt` and the fast H-block reads local.
+
 ## [2.8.0] - 2026-11-14
 
 Fork release based on upstream `2.7.00`.

@@ -2,7 +2,7 @@
 
 [English](README.md) | **Русский**
 
-[![Siseli Local Bridge](https://img.shields.io/badge/version-2.8.0-blue.svg?label=Siseli%20Local%20Bridge)](siseli_local_bridge/CHANGELOG.md)
+[![Siseli Local Bridge](https://img.shields.io/badge/version-2.8.1-blue.svg?label=Siseli%20Local%20Bridge)](siseli_local_bridge/CHANGELOG.md)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-Add--on-green.svg)](https://www.home-assistant.io/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey.svg)](LICENSE)
 
@@ -43,8 +43,9 @@ Assistant через MQTT auto-discovery. Поддерживаются три р
   уходит в облако как есть;
 - **постоянный журнал** (`monitor.jsonl`) с записями `cloud`, `dongle`, `fast`, `slow`
   и ротацией по размеру;
-- **дополнения HTTP bootstrap** — `gatherProtocol`, `syncTime` и authenticated
-  upstream fallback для неизвестных `/dtu/` запросов;
+- **дополнения HTTP bootstrap** — `gatherProtocol`, `syncTime`, authenticated
+  upstream fallback для неизвестных `/dtu/` запросов и режим
+  `HTTP_BOOTSTRAP_MODE` (`local` / `cloud` / `cloud_then_local`);
 - **поддержка BMS HPVINV08** — aliases `dbXf`/`MzuA` и исправление направления тока;
 - **диагностический live probe** (`LIVE_PROBE_*`) и **Docker deployment**;
 - **русский README** и проверенный путь Docker Compose.
@@ -85,6 +86,7 @@ Assistant через MQTT auto-discovery. Поддерживаются три р
 
 ```yaml
 UPSTREAM_RELAY: true
+HTTP_BOOTSTRAP_MODE: cloud_then_local
 LOCAL_CLOUD_IP: 192.168.1.250
 LIVE_POLL_INTERVAL_SEC: 5
 LIVE_MAX_INFLIGHT: 1
@@ -211,6 +213,7 @@ LOCAL_CLOUD_IP=192.168.1.250
 LOCAL_CLOUD_PORT=1883
 HTTP_STUB_PORT=80
 HTTP_STUB_REAL_IPS=8.212.16.60
+HTTP_BOOTSTRAP_MODE=local
 DNS_SPOOF_DOMAIN=broker.mqtt.solar.siseli.com,dtu.access.solar.siseli.com
 MQTT_BROKER_HOSTNAME=hongkong.broker.mqtt.solar.siseli.com
 

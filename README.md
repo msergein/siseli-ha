@@ -2,7 +2,7 @@
 
 **English** | [Русский](README.ru.md)
 
-[![Siseli Local Bridge](https://img.shields.io/badge/version-2.8.0-blue.svg?label=Siseli%20Local%20Bridge)](siseli_local_bridge/CHANGELOG.md)
+[![Siseli Local Bridge](https://img.shields.io/badge/version-2.8.1-blue.svg?label=Siseli%20Local%20Bridge)](siseli_local_bridge/CHANGELOG.md)
 [![HA Add-on](https://img.shields.io/badge/Home%20Assistant-Add--on-green.svg)](https://www.home-assistant.io/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey.svg)](LICENSE)
 
@@ -50,8 +50,9 @@ Compared with upstream `siseli-local-bridge`, this fork adds:
   forwarded as-is to the vendor cloud.
 - **Always-on journal** (`monitor.jsonl`) with `cloud`, `dongle`, `fast` and `slow`
   records and size-based rotation.
-- **HTTP bootstrap additions** — `gatherProtocol`, `syncTime` and an authenticated
-  upstream fallback for unknown `/dtu/` calls.
+- **HTTP bootstrap additions** — `gatherProtocol`, `syncTime`, an authenticated
+  upstream fallback for unknown `/dtu/` calls, and `HTTP_BOOTSTRAP_MODE`
+  (`local` / `cloud` / `cloud_then_local`).
 - **HPVINV08 BMS support** — `dbXf`/`MzuA` aliases and the BMS current-direction fix.
 - **Diagnostic live probe** (`LIVE_PROBE_*`) and **Docker deployment** documentation.
 - **Russian README** and a tested Docker Compose path.
@@ -143,6 +144,7 @@ LOCAL_CLOUD_IP=192.168.1.250
 LOCAL_CLOUD_PORT=1883
 HTTP_STUB_PORT=80
 HTTP_STUB_REAL_IPS=8.212.16.60
+HTTP_BOOTSTRAP_MODE=local
 DNS_SPOOF_DOMAIN=broker.mqtt.solar.siseli.com,dtu.access.solar.siseli.com
 MQTT_BROKER_HOSTNAME=hongkong.broker.mqtt.solar.siseli.com
 
@@ -238,6 +240,7 @@ Enable it with:
 
 ```yaml
 UPSTREAM_RELAY: true
+HTTP_BOOTSTRAP_MODE: cloud_then_local
 LOCAL_CLOUD_IP: 192.168.1.250
 LIVE_POLL_INTERVAL_SEC: 5
 LIVE_MAX_INFLIGHT: 1

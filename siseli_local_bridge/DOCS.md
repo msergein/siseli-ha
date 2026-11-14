@@ -346,6 +346,7 @@ inverter offline for as long as this mode is on.
 | `LOCAL_CLOUD_PORT` | `1883` | Port of the built-in MQTT broker the dongle connects to. Keep the real cloud's port |
 | `HTTP_STUB_PORT` | `80` | Port of the built-in HTTP API that answers the dongle's boot-time check-in and broker lookup |
 | `HTTP_STUB_REAL_IPS` | `8.212.16.60` | The vendor's HTTP address. Some dongles call it directly without DNS; it is answered locally too |
+| `HTTP_BOOTSTRAP_MODE` | `local` | Who answers boot-time HTTP calls: `local` (bridge), `cloud` (vendor only, no fallback), `cloud_then_local` (cloud first, local fallback on network failure). `/dtu/servers/mqtt` always stays local |
 | `DNS_SPOOF_DOMAIN` | `broker.mqtt.solar.siseli.com,dtu.access.solar.siseli.com` | DNS names answered with `LOCAL_CLOUD_IP`. Keep both: without the second one the dongle connects but never sends telemetry |
 | `MQTT_BROKER_HOSTNAME` | `hongkong.broker.mqtt.solar.siseli.com` | The broker name the HTTP API hands the dongle. Must fall under `DNS_SPOOF_DOMAIN` |
 | `TELEMETRY_POLL_INTERVAL_SEC` | `0` | How often the bridge requests a full reading. `15` works well; `0` waits for the dongle's own push, about every five minutes |
@@ -434,12 +435,18 @@ Recommended options:
 ```yaml
 LOCAL_CLOUD_IP: 192.168.1.250
 UPSTREAM_RELAY: true
+HTTP_BOOTSTRAP_MODE: cloud_then_local
 LIVE_POLL_INTERVAL_SEC: 5
 LIVE_MAX_INFLIGHT: 1
 LIVE_MONITOR: true
 LIVE_MONITOR_ONLY: false
 TELEMETRY_POLL_INTERVAL_SEC: 0
 ```
+
+`HTTP_BOOTSTRAP_MODE: cloud_then_local` lets the cloud see the dongle's boot-time
+check-in and protocol descriptor. Without it the cloud may keep reporting
+`Gather protocol version not exists` / `Energy flow rule not exists`. `/dtu/servers/mqtt`
+still stays local, so the dongle connects to the local broker and fast reads remain local.
 
 The cloud sees the Home Assistant host's IP, not the dongle's, and the same MQTT client
 id. This may violate the vendor's terms or trigger server-side session handling. The

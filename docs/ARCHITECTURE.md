@@ -146,7 +146,7 @@ Consequences:
 
 - Tests must patch the **consuming** module (`tests/helpers.py:98` `patch_consts`); reloading `config.py` changes nothing the runtime reads.
 - Names starting with `_` are not exported by a star import. `core.py` and `mqtt.py` carry a ruff `F405` exemption (`pyproject.toml:64-66`), so a reference to one is caught by neither lint nor tests; `tests/test_core.py:577-600` greps for it, and the smoke test exists because this crash-looped a release. `config.py:146-147` defines `ACTIVE_DEBUG_FLAGS` for exactly this reason. `parsers.py` never had a star import despite the exemption at `pyproject.toml:66`.
-- `validate_config` (`config.py:313`) is called only from `__main__` (`core.py:581-582`) and `sys.exit`s on error, so importing `config` in tests never aborts.
+- `validate_config` (`config.py:317`) is called only from `__main__` (`core.py:581-582`) and `sys.exit`s on error, so importing `config` in tests never aborts.
 - Not env-driven: `STATE_CACHE_FILE` (`config.py:5`), `STATE_CACHE_INTERVAL_SEC` (`:162`), the reassembly bounds (`:167-175`). Read from env but deliberately not add-on options: `TELEMETRY_TIMEOUT_MULTIPLIER`, `TELEMETRY_TIMEOUT_CEILING_SEC`, `ENERGY_MAX_DT_SEC` (`:76-92`), because Supervisor pins a stored option forever and a default is not a fix.
 - The state module is aliased two ways: `_state` in `core.py:27` and `mqtt.py:6`, `_shared_state` in `parsers.py:8`. Grep for both when tracing a flag.
 
@@ -167,6 +167,11 @@ second, real TCP socket to `TARGET_HOST:TARGET_PORT`:
 `LIVE_MONITOR` is independent of `LIVE_MONITOR_ONLY`: the journal is always written unless
 disabled, while the latter only suppresses fast publishes to MQTT/Home Assistant. Rotation
 keeps `monitor.jsonl` bounded (`MONITOR_MAX_BYTES`, `MONITOR_BACKUPS`).
+
+`HTTP_BOOTSTRAP_MODE` selects who answers the dongle's boot-time HTTP calls:
+`local` (the stub), `cloud` (vendor only, no fallback), or `cloud_then_local` (vendor
+first, local fallback on a network failure). `/dtu/servers/mqtt` always stays local so
+the dongle still connects to the local MQTT broker.
 
 The relay is opt-in and experimental. The current fork has been tested as a Docker
 Compose deployment; the Home Assistant add-on packaging path has not been tested.
@@ -294,7 +299,7 @@ Fix: rename the entity to what it measures or derive the count from uxJp's posit
 ## Conventions that are load-bearing
 
 - **Publish only what this payload evidences; one writer per key.** Every branch of `_try_ascii_schema` is `if len(vals) >= n` (`parsers.py:1799`, `:1358`, `:1454`); no defaults, no constants, no cross-block aliases. The only cross-payload reads are the `bat_v` cache fallback (`:827-829`) and previous energy totals (`:773`). Enforced by `tests/test_truthfulness.py:35-94` (no fabrication), `:97-179` (single writer), `:554-574` (golden parity).
-- **Timing bounds come from measured cadence, not from another option.** `state.observed_telemetry_interval` (`state.py:55-62`) feeds both `effective_telemetry_timeout` (`core.py:579-399`) and `_energy_max_dt` (`parsers.py:987`); `UPDATE_INTERVAL_SEC` is a publish throttle and says nothing about the inverter (`config.py:181`). The measured cadence is a fixture (`tests/test_core.py:603-692`, `tests/test_truthfulness.py:394-470`).
+- **Timing bounds come from measured cadence, not from another option.** `state.observed_telemetry_interval` (`state.py:55-62`) feeds both `effective_telemetry_timeout` (`core.py:579-399`) and `_energy_max_dt` (`parsers.py:987`); `UPDATE_INTERVAL_SEC` is a publish throttle and says nothing about the inverter (`config.py:185`). The measured cadence is a fixture (`tests/test_core.py:603-692`, `tests/test_truthfulness.py:394-470`).
 - **A bound that fires during normal operation logs, once, and its once-flag is registered for isolation.** `[ENERGY GAP CLAMPED]` (`parsers.py:703`), `[GRID VALUE REJECTED]` (`:1396`), `[UNSUPPORTED PROTOCOL]` (`:2031`); each flag is saved and restored by `tests/helpers.py:121-167`. Add a flag without registering it and later tests inherit the fired state.
 - **Shared flags live in `state.py` and are reached through the module alias.** `state.py:23-26` and `:44-52` record the two bugs that came from private copies (`RUNNING`, `AVAILABILITY_ONLINE`). Access is `_state.NAME` (`core.py:27`, `mqtt.py:6`) or `_shared_state.NAME` (`parsers.py:8`), never `from .state import NAME`. Regression pinned at `tests/test_core.py:421-485`.
 - **Patch constants on the consuming module; never reference `_private` config names across a star import.** `core.py:24` and `mqtt.py:7` hold bound copies; `tests/helpers.py:98` `patch_consts` is the tool; `tests/test_core.py:577-600` greps for underscore names because `pyproject.toml:64-66` exempts `F405`.
