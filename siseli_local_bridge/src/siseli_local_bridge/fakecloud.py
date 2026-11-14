@@ -36,6 +36,7 @@ import json
 import os
 import random
 import re
+import socket
 import string
 import threading
 import time
@@ -51,6 +52,8 @@ from .config import (
     LOG_PACKETS,
     LOG_UNPARSED_PUBLISH,
     STATE_CACHE_FILE,
+    TARGET_HOST,
+    TARGET_PORT,
     TELEMETRY_POLL_INTERVAL_SEC,
 )
 from .loggers import log, log_kv, log_payload_preview
@@ -75,6 +78,14 @@ LIVE_PROBE_MAX_CONSECUTIVE_MISSING = 10
 #: still writing this journal. Rotated by size, so a long run cannot fill /data.
 LIVE_MONITOR = os.getenv("LIVE_MONITOR", "1").strip().lower() in ("1", "true", "yes", "on")
 LIVE_MONITOR_ONLY = os.getenv("LIVE_MONITOR_ONLY", "0").strip().lower() in ("1", "true", "yes", "on")
+#: Hybrid relay: terminate the dongle's MQTT session locally, open a second TCP
+#: connection to the real vendor cloud, and pass all non-local frames through it.
+#: Cloud frames are forwarded to the dongle unchanged; dongle telemetry is parsed
+#: for HA and forwarded upstream. The bridge's own fast dev_rpc commands/replies
+#: are identified by their token map and never go to the cloud.
+UPSTREAM_RELAY = os.getenv("UPSTREAM_RELAY", "0").strip().lower() in ("1", "true", "yes", "on")
+_UPSTREAM_CONNECT_TIMEOUT_SEC = float(os.getenv("UPSTREAM_CONNECT_TIMEOUT_SEC", "8") or 8)
+_UPSTREAM_IO_TIMEOUT_SEC = 1.0
 _MONITOR_PATH = os.path.join(os.path.dirname(STATE_CACHE_FILE) or "/data", "monitor.jsonl")
 _MONITOR_MAX_BYTES = int(os.getenv("MONITOR_MAX_BYTES", str(20 * 1024 * 1024)) or 20 * 1024 * 1024)
 _MONITOR_BACKUPS = max(1, int(os.getenv("MONITOR_BACKUPS", "5") or 5))
@@ -367,6 +378,7 @@ def _take_live_command(conn: tcpstack.Connection, token: Optional[str]):
     A token is answered once, so the entry is popped. An unknown or expired token
     returns (None, None): the caller must not fall back to the answer's shape.
     """
+    getattr(conn, "local_tokens", {}).pop(token, None)
     item = getattr(conn, "live_token_command", {}).pop(token, None)
     if item is None:
         return None, None
@@ -375,6 +387,199 @@ def _take_live_command(conn: tcpstack.Connection, token: Optional[str]):
         cycle = item[2] if len(item) > 2 else None
         return command, cycle
     return item, None
+
+
+def _publish_parts(control: int, body: bytes):
+    """(topic, payload) from a PUBLISH frame body, or (None, None) if truncated."""
+    qos = (control >> 1) & 0x03
+    if len(body) < 2:
+        return None, None
+    topic_len = int.from_bytes(body[0:2], "big")
+    topic = body[2:2 + topic_len].decode("utf-8", errors="replace")
+    offset = 2 + topic_len
+    if qos > 0:
+        offset += 2
+    return topic, body[offset:]
+
+
+def _is_local_publish(control: int, body: bytes, conn: tcpstack.Connection) -> bool:
+    """Whether a dongle PUBLISH is the answer to one of *our* fast commands.
+
+    The echoed token is the discriminator; cloud-originated requests carry a token
+    that is not in this connection's local maps, so their answers are forwarded
+    upstream. A token map entry is authoritative: no shape or topic heuristics.
+    """
+    if ((control >> 4) & 0x0F) != MQTT_PUBLISH:
+        return False
+    _, payload = _publish_parts(control, body)
+    if not payload:
+        return False
+    envelope = _extract_envelope(payload)
+    if not isinstance(envelope, dict) or envelope.get("i") != 504:
+        return False
+    token = envelope.get("t")
+    token = str(token) if token is not None else None
+    if token is None:
+        return False
+    return (
+        token in getattr(conn, "local_tokens", {})
+        or token in getattr(conn, "live_token_command", {})
+        or token in getattr(conn, "probe_outstanding", {})
+    )
+
+
+def _upstream_send(conn: tcpstack.Connection, frame: bytes) -> bool:
+    sock = getattr(conn, "upstream_socket", None)
+    if sock is None:
+        return False
+    try:
+        sock.sendall(frame)
+        return True
+    except OSError as exc:
+        log(f"[UPSTREAM] send failed: {exc}", level="warning")
+        return False
+
+
+def _upstream_close(conn: tcpstack.Connection) -> None:
+    sock = getattr(conn, "upstream_socket", None)
+    conn.upstream_socket = None
+    conn.upstream_ready = False
+    if sock is not None:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def _monitor_cloud(control: int, body: bytes) -> None:
+    """Record one cloud-originated MQTT frame; the upstream socket is the marker."""
+    if not LIVE_MONITOR:
+        return
+    ptype = (control >> 4) & 0x0F
+    record = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "source": "cloud",
+        "direction": "cloud->dongle",
+        "mqtt_type": ptype,
+    }
+    if ptype == MQTT_PUBLISH:
+        topic, payload = _publish_parts(control, body)
+        record["topic"] = topic
+        envelope = _extract_envelope(payload) if payload else None
+        if isinstance(envelope, dict):
+            record["i"] = envelope.get("i")
+            record["token"] = envelope.get("t")
+            record["e"] = envelope.get("e")
+        if payload:
+            record["raw_text"] = payload.decode("latin1", errors="replace")[:500]
+    _monitor_write(record)
+
+
+def _upstream_reader(conn: tcpstack.Connection, sock) -> None:
+    """Pass cloud bytes to the dongle unchanged and note when CONNACK arrived.
+
+    The monitor parses a copy of the cloud byte stream; the dongle still receives
+    the original bytes. Nothing here is classified by DNS or by the dongle's
+    spoofed destination: this socket is the cloud leg by construction.
+    """
+    cloud_buffer = b""
+    try:
+        while not conn.closed:
+            try:
+                data = sock.recv(65536)
+            except socket.timeout:
+                continue
+            except OSError as exc:
+                if not conn.closed:
+                    log(f"[UPSTREAM] receive failed: {exc}", level="warning")
+                break
+            if not data:
+                break
+            try:
+                frames, cloud_buffer = extract_mqtt_frames(cloud_buffer + data)
+            except ValueError as exc:
+                log(f"[UPSTREAM] malformed cloud MQTT data: {exc}", level="warning")
+                cloud_buffer = b""
+            else:
+                for control, body in frames:
+                    _monitor_cloud(control, body)
+            conn.upstream_ready = True
+            conn.reply(data)
+    finally:
+        _upstream_close(conn)
+        if not conn.closed:
+            log("[UPSTREAM] cloud closed the session; closing the dongle connection", level="warning")
+            conn.close("upstream closed")
+            tcpstack.CONNECTIONS.pop(
+                (conn.local_ip, conn.local_port, conn.peer_ip, conn.peer_port), None
+            )
+
+
+def _upstream_open(conn: tcpstack.Connection, connect_frame: bytes) -> bool:
+    """Open the real-cloud leg and forward the dongle's CONNECT frame verbatim."""
+    try:
+        sock = socket.create_connection(
+            (TARGET_HOST, TARGET_PORT), timeout=_UPSTREAM_CONNECT_TIMEOUT_SEC
+        )
+        sock.settimeout(_UPSTREAM_IO_TIMEOUT_SEC)
+        sock.sendall(connect_frame)
+    except OSError as exc:
+        log(f"[UPSTREAM] connect to {TARGET_HOST}:{TARGET_PORT} failed: {exc}", level="warning")
+        return False
+    conn.upstream_socket = sock
+    conn.upstream_ready = False
+    threading.Thread(
+        target=_upstream_reader,
+        args=(conn, sock),
+        daemon=True,
+        name="upstream-relay",
+    ).start()
+    log(f"[UPSTREAM] relay opened to {TARGET_HOST}:{TARGET_PORT}")
+    return True
+
+
+def _monitor_forwarded(control: int, body: bytes) -> None:
+    """Record one dongle PUBLISH that is being forwarded to the cloud."""
+    if not LIVE_MONITOR:
+        return
+    topic, payload = _publish_parts(control, body)
+    record = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "source": "dongle",
+        "direction": "dongle->cloud",
+        "mqtt_type": (control >> 4) & 0x0F,
+        "topic": topic,
+    }
+    envelope = _extract_envelope(payload) if payload else None
+    if isinstance(envelope, dict):
+        record["i"] = envelope.get("i")
+        record["token"] = envelope.get("t")
+        record["e"] = envelope.get("e")
+    if payload:
+        record["raw_text"] = payload.decode("latin1", errors="replace")[:500]
+    _monitor_write(record)
+
+
+def _parse_forwarded_publish(control: int, body: bytes, conn: tcpstack.Connection) -> None:
+    """Decode a cloud-bound dongle payload for HA without acknowledging it locally.
+
+    The cloud's own PUBACK is forwarded back to the dongle, so sending a local one
+    here would duplicate it. This is the slow/reference stream; fast H replies take
+    the local _handle_publish path instead.
+    """
+    _monitor_forwarded(control, body)
+    topic, payload = _publish_parts(control, body)
+    if not payload:
+        return
+    fresh = _without_live_blocks(payload, conn)
+    parsed_ok = SolarParser.parse_payload(fresh, source_topic=topic) if fresh else True
+    if not parsed_ok and LOG_UNPARSED_PUBLISH:
+        log_payload_preview("[UPSTREAM PAYLOAD NOT PARSED]", payload, topic=topic)
+    if LIVE_MONITOR and not (
+        isinstance(_extract_envelope(payload), dict)
+        and _extract_envelope(payload).get("i") == 504
+    ):
+        _monitor_slow("cloud")
 
 
 def _handle_publish(control: int, body: bytes, conn: tcpstack.Connection) -> bytes:
@@ -714,36 +919,49 @@ def _log_command_reply(payload: bytes, conn: tcpstack.Connection, command: Optio
     log(f"[CONTROL] inverter answered {display}: {text}", level="warning")
 
 
+def _remember_connection(conn: tcpstack.Connection, dtu_id: Optional[str]) -> None:
+    """Set the per-connection metadata the live reads and poll diagnostics use."""
+    if not dtu_id:
+        return
+    conn.dtu_id = dtu_id
+    if TELEMETRY_POLL_INTERVAL_SEC > 0:
+        conn.next_poll_ts = time.monotonic() + TELEMETRY_POLL_INTERVAL_SEC
+    conn.poll_sent_count = 0
+    conn.poll_reply_count = 0
+    conn.connect_ts = time.monotonic()
+    conn.last_reply_ts = conn.connect_ts
+    conn.poll_stall_logged = False
+
+
 def _handle_frame(control: int, body: bytes, conn: tcpstack.Connection) -> bytes:
     ptype = (control >> 4) & 0x0F
 
     if ptype == MQTT_CONNECT:
         dtu_id = _log_connect(body)
-        if dtu_id:
-            # Attributes on tcpstack.Connection itself rather than a side dict --
-            # simplest way to remember which device a poll needs to be addressed
-            # to without a second lookup structure to keep in sync with
-            # tcpstack.CONNECTIONS' own lifecycle (creation, FIN/RST, sweep_stale).
-            # Set whatever the poll options say: the control commands and the live
-            # reads address the device through it too, and with
-            # TELEMETRY_POLL_INTERVAL_SEC at its shipped 0 they used to find no
-            # connection at all.
-            conn.dtu_id = dtu_id
-            if TELEMETRY_POLL_INTERVAL_SEC > 0:
-                conn.next_poll_ts = time.monotonic() + TELEMETRY_POLL_INTERVAL_SEC
-            # DIAGNOSTIC (2026-09-13): counters for the "poll stall" seen in
-            # production on 2026-09-13 -- dev_rpc kept going out every 15s, cleanly
-            # TCP-ACKed (no loss, no desync -- ruled out the 2026-09-12 TCP fix), but
-            # dev_rpc_reply stopped after the very first success of the session. Not
-            # yet known whether this is poll-count-triggered or time-triggered; these
-            # let poll_due_connections log whichever it turns out to be, once, the
-            # next time it happens, instead of re-diagnosing from raw captures again.
-            conn.poll_sent_count = 0
-            conn.poll_reply_count = 0
-            conn.connect_ts = time.monotonic()
-            conn.last_reply_ts = conn.connect_ts
-            conn.poll_stall_logged = False
-        return _build_frame(0x20, b"\x00\x00")  # CONNACK: no session present, accepted
+        _remember_connection(conn, dtu_id)
+        if UPSTREAM_RELAY and _upstream_open(conn, _build_frame(control, body)):
+            # The real cloud's CONNACK is forwarded by _upstream_reader; do not
+            # send a second, locally generated one.
+            return b""
+        return _build_frame(0x20, b"\x00\x00")  # local fallback CONNACK
+
+    if UPSTREAM_RELAY and getattr(conn, "upstream_socket", None) is not None:
+        if ptype == MQTT_PUBLISH and _is_local_publish(control, body, conn):
+            # Our fast H/QMOD/QFLAG replies and locally issued settings commands.
+            # They never reach the cloud, and the local ACK is the only ACK.
+            return _handle_publish(control, body, conn)
+        frame = _build_frame(control, body)
+        if not _upstream_send(conn, frame):
+            return b""
+        if ptype == MQTT_PUBLISH:
+            _parse_forwarded_publish(control, body, conn)
+        if ptype == MQTT_DISCONNECT:
+            _upstream_close(conn)
+            tcpstack.CONNECTIONS.pop(
+                (conn.local_ip, conn.local_port, conn.peer_ip, conn.peer_port), None
+            )
+            conn.closed = True
+        return b""
 
     if ptype == MQTT_SUBSCRIBE:
         return _handle_subscribe(body)
@@ -1401,14 +1619,16 @@ def _expire_live_commands(conn: tcpstack.Connection, now: float) -> None:
     is kept until this TTL: a late answer inside the TTL is still typed by its token,
     never by its shape. Past the TTL the answer is not decoded at all.
     """
-    by_token = getattr(conn, "live_token_command", None)
-    if not by_token:
-        return
+    by_token = getattr(conn, "live_token_command", None) or {}
     for token, item in list(by_token.items()):
         sent_at = item[1] if isinstance(item, tuple) and len(item) > 1 else None
         if sent_at is None or now - sent_at > _LIVE_TOKEN_TTL_SEC:
             del by_token[token]
             _live_note(conn, "token expired")
+    local = getattr(conn, "local_tokens", None) or {}
+    for token, sent_at in list(local.items()):
+        if now - sent_at > _LIVE_TOKEN_TTL_SEC:
+            del local[token]
 
 
 def _inflight(conn: tcpstack.Connection, now: float) -> dict:
@@ -1533,6 +1753,12 @@ def _send_control_ci(ci_b64: str, conn: Optional[tcpstack.Connection] = None, cl
             cycles = conn.live_token_cycle = {}
         cycle = getattr(conn, "live_cycle", 0)
         cycles[token] = cycle
+        # Every locally issued command, including a settings write with no H-block
+        # type, must be recognisable when its answer comes back in relay mode.
+        local = getattr(conn, "local_tokens", None)
+        if local is None:
+            local = conn.local_tokens = {}
+        local[token] = sent_at
         if command:
             by_token = getattr(conn, "live_token_command", None)
             if by_token is None:
@@ -2018,10 +2244,19 @@ def poll_due_connections() -> None:
         dtu_id = getattr(conn, "dtu_id", None)
         if dtu_id is None or conn.closed:
             continue
+        # In relay mode the cloud owns the slow/full poll. Wait for its CONNACK
+        # before injecting local fast commands into the dongle's session.
+        if UPSTREAM_RELAY and getattr(conn, "upstream_socket", None) is not None \
+                and not getattr(conn, "upstream_ready", False):
+            continue
         if live_interval > 0:
             with _SEND_LOCK:
                 _send_live_reads(conn, now, live_interval)
             _live_report(conn, now)
+        if UPSTREAM_RELAY:
+            # No local i=501 poll: it would duplicate the cloud's own poll and
+            # consume the dongle's request/response slot.
+            continue
         next_poll_ts = getattr(conn, "next_poll_ts", None)
         if TELEMETRY_POLL_INTERVAL_SEC <= 0 or next_poll_ts is None or now < next_poll_ts:
             continue
