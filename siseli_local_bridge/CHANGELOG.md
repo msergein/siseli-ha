@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Diagnostic live command probe (`LIVE_PROBE_*`).** In 100% local mode,
+  `LIVE_PROBE_COMMANDS` sends each configured H/PI30 read `LIVE_PROBE_REPEATS` times
+  (default 50) with a configurable gap and inflight limit, replacing the normal live
+  and telemetry polls while it runs. Each answer is classified as `ack`, `nak`,
+  `missing` or `mismatch`, with RTT percentiles, the raw `co` answer and the echoed
+  token, logged as `[LIVE PROBE]` and written to `/data/live_probe_*.json`. It aborts
+  after 10 consecutive missing answers or 60 s without a reply. Disabled by default;
+  requires `LOCAL_CLOUD_IP`.
+
 ### Fixed
 
 - **BMS battery current direction on HPVINV08 firmware 0020.05.** Some firmware puts

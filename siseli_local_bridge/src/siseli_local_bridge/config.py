@@ -78,6 +78,15 @@ TELEMETRY_POLL_INTERVAL_SEC = int(os.getenv("TELEMETRY_POLL_INTERVAL_SEC", "0"))
 # (fakecloud.py). Only used when LOCAL_CLOUD_IP is set.
 LIVE_POLL_INTERVAL_SEC = int(os.getenv("LIVE_POLL_INTERVAL_SEC", "10"))
 
+# Diagnostic command probe, 100% local only. It sends the configured H/PI30 reads
+# one at a time (or two with LIVE_PROBE_INFLIGHT=2) and records ack/nak/missing/
+# mismatch plus RTT. Empty LIVE_PROBE_COMMANDS disables it; "all" expands to the
+# live poll's command set. The probe replaces the live/telemetry poll while it runs.
+LIVE_PROBE_COMMANDS = os.getenv("LIVE_PROBE_COMMANDS", "").strip()
+LIVE_PROBE_REPEATS = int(os.getenv("LIVE_PROBE_REPEATS", "50") or "50")
+LIVE_PROBE_GAP_SEC = float(os.getenv("LIVE_PROBE_GAP_SEC", "2.0") or "2.0")
+LIVE_PROBE_INFLIGHT = int(os.getenv("LIVE_PROBE_INFLIGHT", "1") or "1")
+
 # Comma-separated, each suffix-matched rather than an exact hostname: the vendor's
 # own broker name observed in a real capture was "hongkong.broker.mqtt.solar.
 # siseli.com" (2026-09-11), a region-prefixed subdomain, so matching only that
@@ -324,6 +333,14 @@ def validate_config() -> None:
             errors.append(f"TELEMETRY_POLL_INTERVAL_SEC must be >= 0, got {TELEMETRY_POLL_INTERVAL_SEC}")
         if LIVE_POLL_INTERVAL_SEC < 0:
             errors.append(f"LIVE_POLL_INTERVAL_SEC must be >= 0, got {LIVE_POLL_INTERVAL_SEC}")
+        if LIVE_PROBE_REPEATS < 1:
+            errors.append(f"LIVE_PROBE_REPEATS must be >= 1, got {LIVE_PROBE_REPEATS}")
+        if LIVE_PROBE_GAP_SEC < 0:
+            errors.append(f"LIVE_PROBE_GAP_SEC must be >= 0, got {LIVE_PROBE_GAP_SEC}")
+        if LIVE_PROBE_INFLIGHT not in (1, 2):
+            errors.append(f"LIVE_PROBE_INFLIGHT must be 1 or 2, got {LIVE_PROBE_INFLIGHT}")
+        if LIVE_PROBE_COMMANDS and not LOCAL_CLOUD_IP:
+            errors.append("LIVE_PROBE_COMMANDS requires LOCAL_CLOUD_IP (the probe is 100% local only)")
 
     for name, val in [
         ("TARGET_PORT", TARGET_PORT),

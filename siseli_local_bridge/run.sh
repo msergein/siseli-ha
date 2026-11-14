@@ -17,6 +17,10 @@ export DNS_SPOOF_DOMAIN="$(bashio::config 'DNS_SPOOF_DOMAIN' 'broker.mqtt.solar.
 export MQTT_BROKER_HOSTNAME="$(bashio::config 'MQTT_BROKER_HOSTNAME' 'hongkong.broker.mqtt.solar.siseli.com')"
 export TELEMETRY_POLL_INTERVAL_SEC="$(bashio::config 'TELEMETRY_POLL_INTERVAL_SEC' '0')"
 export LIVE_POLL_INTERVAL_SEC="$(bashio::config 'LIVE_POLL_INTERVAL_SEC' '10')"
+export LIVE_PROBE_COMMANDS="$(bashio::config 'LIVE_PROBE_COMMANDS' '')"
+export LIVE_PROBE_REPEATS="$(bashio::config 'LIVE_PROBE_REPEATS' '50')"
+export LIVE_PROBE_GAP_SEC="$(bashio::config 'LIVE_PROBE_GAP_SEC' '2.0')"
+export LIVE_PROBE_INFLIGHT="$(bashio::config 'LIVE_PROBE_INFLIGHT' '1')"
 
 export INVERTER_IP="$(bashio::config 'INVERTER_IP')"
 export ROUTER_IP="$(bashio::config 'ROUTER_IP')"

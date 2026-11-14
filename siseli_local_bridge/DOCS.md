@@ -126,6 +126,10 @@ in step 3 above.
 | `EXPIRE_AFTER_SEC` | `1800` | How long a value stays valid before Home Assistant marks it unavailable. `0` disables |
 | `TELEMETRY_TIMEOUT_SEC` | `1800` | How long without a decoded reading before the bridge marks sensors unavailable |
 | `LIVE_POLL_INTERVAL_SEC` | `10` | How often a cycle of live reads (PV, grid, output, battery, BMS and cell values, mode) is taken straight from the inverter; temperatures, energies and warnings are refreshed one by one every few cycles. The regular poll only returns a cache the dongle refreshes about once a minute. Each cycle reads grid, output and PV power plus two of the other reads in turn (battery, BMS and cells, mode, then the slow ones), keeping two commands with the dongle, the next going as soon as one is answered: about 2.8 s a cycle, so the power values refresh every cycle and the rest every third. A value shorter than a cycle runs the cycles back to back. Values under `1` are raised to `1`. `0` disables it. Needs `LOCAL_CLOUD_IP` |
+| `LIVE_PROBE_COMMANDS` | `''` | Diagnostic command probe, **100% local only**. Comma-separated H/PI30 reads, or `all` for the live-poll set. While it runs the live and telemetry polls stop; each command is repeated `LIVE_PROBE_REPEATS` times and the outcome is logged as `[LIVE PROBE]` and written to `/data/live_probe_*.json`. Empty disables it. Aborts after 10 consecutive missing answers or 60 s without any reply and writes a partial JSON with `aborted` set. Needs `LOCAL_CLOUD_IP` |
+| `LIVE_PROBE_REPEATS` | `50` | Repeats per probe command |
+| `LIVE_PROBE_GAP_SEC` | `2.0` | Pause between probe batches; raise to 2.5–3 s if the 2400 baud link loses answers |
+| `LIVE_PROBE_INFLIGHT` | `1` | Probe commands with the dongle at once: `1` (first pass) or `2` |
 
 These three interact, and the add-on **refuses to start** if they contradict each other:
 

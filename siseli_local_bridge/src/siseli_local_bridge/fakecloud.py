@@ -33,6 +33,7 @@ cloud session, start here.
 import base64
 import binascii
 import json
+import os
 import random
 import re
 import string
@@ -43,14 +44,32 @@ from typing import Optional
 from . import tcpstack
 from .config import (
     LIVE_POLL_INTERVAL_SEC,
+    LOCAL_CLOUD_IP,
     LOG_MQTT_PAYLOAD_PREVIEW,
     MAX_MQTT_PACKET,
     LOG_MQTT_TOPICS,
     LOG_PACKETS,
     LOG_UNPARSED_PUBLISH,
+    STATE_CACHE_FILE,
     TELEMETRY_POLL_INTERVAL_SEC,
 )
 from .loggers import log, log_kv, log_payload_preview
+try:
+    from .config import (
+        LIVE_PROBE_COMMANDS,
+        LIVE_PROBE_GAP_SEC,
+        LIVE_PROBE_INFLIGHT,
+        LIVE_PROBE_REPEATS,
+    )
+except ImportError:  # older image config.py: read the same env directly
+    LIVE_PROBE_COMMANDS = os.getenv("LIVE_PROBE_COMMANDS", "").strip()
+    LIVE_PROBE_REPEATS = int(os.getenv("LIVE_PROBE_REPEATS", "50") or "50")
+    LIVE_PROBE_GAP_SEC = float(os.getenv("LIVE_PROBE_GAP_SEC", "2.0") or "2.0")
+    LIVE_PROBE_INFLIGHT = int(os.getenv("LIVE_PROBE_INFLIGHT", "1") or "1")
+LIVE_PROBE_TIMEOUT_SEC = 3.0
+LIVE_PROBE_STALL_SEC = 60.0
+LIVE_PROBE_MAX_CONSECUTIVE_MISSING = 10
+
 from .parsers import SolarParser
 
 MQTT_CONNECT = 1
@@ -270,6 +289,7 @@ def _handle_publish(control: int, body: bytes, conn: tcpstack.Connection) -> byt
     if payload and LOG_MQTT_PAYLOAD_PREVIEW:
         log_payload_preview("[LOCAL CLOUD PAYLOAD]", payload, topic=topic)
 
+    probe_consumed = False
     if payload:
         # Blocks a live read refreshed seconds ago are left out of the dongle's own
         # (possibly minute-old) copy; nothing left means nothing to decode.
@@ -298,6 +318,8 @@ def _handle_publish(control: int, body: bytes, conn: tcpstack.Connection) -> byt
                 token = str(token) if token is not None else None
                 # The round the answered command was sent in (2.7.00: rounds overlap,
                 # the next one starting while the last answers of this one are due).
+                # The probe owns its own replies; do not decode them as telemetry.
+                probe_consumed = _probe_handle_reply(conn, token, envelope)
                 conn.answer_cycle = getattr(conn, "live_token_cycle", {}).pop(token, None)
                 command = getattr(conn, "live_token_command", {}).pop(token, None)
                 _live_answered(conn, token)
@@ -306,7 +328,8 @@ def _handle_publish(control: int, body: bytes, conn: tcpstack.Connection) -> byt
                 conn.last_reply_ts = time.monotonic()
                 conn.poll_stall_logged = False
             try:
-                _log_command_reply(payload, conn, command)
+                if not probe_consumed:
+                    _log_command_reply(payload, conn, command)
             finally:
                 conn.answer_cycle = None
 
@@ -1336,6 +1359,7 @@ def _send_control_ci(ci_b64: str, conn: Optional[tcpstack.Connection] = None, cl
     # The dongle echoes "t" in its answer: the place it takes is freed by the answer
     # carrying it, and by no other (_live_answered).
     token = _random_token(8)
+    conn.last_sent_token = token
     if command:
         by_token = getattr(conn, "live_token_command", None)
         if by_token is None:
@@ -1369,6 +1393,290 @@ def _send_control_ci(ci_b64: str, conn: Optional[tcpstack.Connection] = None, cl
     body = len(topic_bytes).to_bytes(2, "big") + topic_bytes + b"\x00" + payload
     conn.reply(_build_frame(0x30, body))
     return True
+
+
+def _probe_enabled() -> bool:
+    """The diagnostic probe only makes sense where the dongle talks to us."""
+    return bool(LIVE_PROBE_COMMANDS) and bool(LOCAL_CLOUD_IP)
+
+
+def _probe_commands() -> list:
+    raw = LIVE_PROBE_COMMANDS
+    if raw.lower() == "all":
+        commands = list(_LIVE_PRIORITY)
+        for pair in _LIVE_OTHERS:
+            commands.extend(c for c in pair if c)
+        commands.extend(_LIVE_SLOW)
+        commands.append("QFLAG")
+    else:
+        commands = [c.strip() for c in raw.split(",") if c.strip()]
+    unique = []
+    for command in commands:
+        if command not in unique:
+            unique.append(command)
+    return unique
+
+
+def _probe_percentile(values, fraction: float):
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = (len(ordered) - 1) * fraction
+    lower = int(index)
+    upper = min(lower + 1, len(ordered) - 1)
+    if lower == upper:
+        return ordered[lower]
+    return ordered[lower] * (upper - index) + ordered[upper] * (index - lower)
+
+
+def _probe_start(conn: tcpstack.Connection, now: float) -> None:
+    commands = _probe_commands()
+    if not commands:
+        return
+    conn.probe_active = True
+    conn.probe_done = False
+    conn.probe_started = time.time()
+    conn.probe_commands_list = commands
+    conn.probe_queue = [command for command in commands for _ in range(LIVE_PROBE_REPEATS)]
+    conn.probe_outstanding = {}
+    conn.probe_raw = {}
+    conn.probe_raw_logged = set()
+    conn.probe_stats = {
+        command: {"n": 0, "ack": 0, "nak": 0, "missing": 0, "mismatch": 0, "rtts": []}
+        for command in commands
+    }
+    conn.probe_inflight = 2 if LIVE_PROBE_INFLIGHT == 2 else 1
+    conn.probe_next_send = now
+    conn.probe_last_reply = now
+    conn.probe_consecutive_missing = 0
+    conn.probe_aborted = False
+    conn.probe_abort_reason = None
+    log(
+        f"[LIVE PROBE] start commands={','.join(commands)} "
+        f"repeats={LIVE_PROBE_REPEATS} gap={LIVE_PROBE_GAP_SEC:g}s "
+        f"inflight={conn.probe_inflight}"
+    )
+    if LIVE_POLL_INTERVAL_SEC > 0 or TELEMETRY_POLL_INTERVAL_SEC > 0:
+        log("[LIVE PROBE] live/telemetry polling is disabled while the probe runs", level="warning")
+
+
+def _probe_send_next(conn: tcpstack.Connection, now: float) -> None:
+    sent = False
+    while conn.probe_queue and len(conn.probe_outstanding) < conn.probe_inflight:
+        command = conn.probe_queue.pop(0)
+        try:
+            if command.startswith("plain:"):
+                raw_command = command.split(":", 1)[1]
+                ci_b64 = base64.b64encode(f"{raw_command}\r".encode("ascii")).decode()
+            elif command in _H_BLOCKS:
+                ci_b64 = base64.b64encode(f"{command}\r".encode("ascii")).decode()
+            else:
+                ci_b64 = build_write_ci(command, "")
+            ok = _send_control_ci(ci_b64, conn=conn, claim=False, sent_at=now)
+        except Exception as exc:
+            log(f"[LIVE PROBE] {command} send failed: {exc}", level="error")
+            return
+        if not ok:
+            return
+        token = getattr(conn, "last_sent_token", None)
+        if token is None:
+            log("[LIVE PROBE] send produced no token", level="warning")
+            return
+        conn.probe_outstanding[token] = {"cmd": command, "sent": now}
+        conn.probe_stats[command]["n"] += 1
+        sent = True
+    if sent:
+        conn.probe_next_send = now + LIVE_PROBE_GAP_SEC
+
+
+def _probe_timeouts(conn: tcpstack.Connection, now: float) -> int:
+    timed_out = 0
+    for token, item in list(conn.probe_outstanding.items()):
+        if now - item["sent"] > LIVE_PROBE_TIMEOUT_SEC:
+            del conn.probe_outstanding[token]
+            command = item["cmd"]
+            if command in conn.probe_stats:
+                conn.probe_stats[command]["missing"] += 1
+            timed_out += 1
+    if timed_out:
+        conn.probe_consecutive_missing = getattr(conn, "probe_consecutive_missing", 0) + timed_out
+    return timed_out
+
+
+def _probe_co_raw(envelope: dict) -> Optional[bytes]:
+    """The raw bytes inside a dev_rpc_reply "co", for the diagnostics log."""
+    body = envelope.get("b") if isinstance(envelope, dict) else None
+    if not isinstance(body, dict) or not body.get("co"):
+        return None
+    try:
+        return base64.b64decode(body["co"] + "==")
+    except (ValueError, binascii.Error):
+        return None
+
+
+def _probe_classify(command: str, envelope: dict):
+    """Return (ack|nak|missing|mismatch, note) for one dev_rpc_reply."""
+    base_command = command.split(":", 1)[1] if command.startswith("plain:") else command
+    body = envelope.get("b") if isinstance(envelope, dict) else None
+    if isinstance(envelope, dict) and envelope.get("e"):
+        return "nak", f"e={envelope.get('e')}"
+    if not isinstance(body, dict) or "co" not in body:
+        return "mismatch", "no co"
+    try:
+        raw = base64.b64decode(body["co"] + "==")
+    except (ValueError, binascii.Error):
+        return "mismatch", "bad base64"
+    text = raw.decode("latin1").strip("\r\n")
+    text = "".join(ch if 32 <= ord(ch) < 127 else "." for ch in text)
+    if text.startswith("(NAK") or text.startswith("^0"):
+        return "nak", text[:30]
+    if base_command in _H_BLOCKS:
+        expected = _H_BLOCKS[base_command]
+        typer = globals().get("_block_for_answer")
+        block = typer(base_command, raw) if callable(typer) else _h_block_of(raw)
+        if block == expected:
+            return "ack", ""
+        return "mismatch", f"block={block or 'unknown'} expected={expected}"
+    if base_command == "QFLAG":
+        return ("ack", "") if _QFLAG_RE.match(text) else ("mismatch", "not QFLAG")
+    if base_command == "QPIWS":
+        live = _pi30_verified_payload(raw)
+        return ("ack", "") if live is not None and _QPIWS_RE.match(live) else ("mismatch", "not QPIWS")
+    live = _pi30_verified_payload(raw)
+    if live is not None:
+        if base_command == "QMOD" and live not in _QMOD_MODES:
+            return "mismatch", f"mode={live!r}"
+        return "ack", ""
+    return "mismatch", "unverified"
+
+
+def _probe_handle_reply(conn: tcpstack.Connection, token: Optional[str], envelope: dict) -> bool:
+    """Consume a dev_rpc_reply that belongs to the probe. False = not ours."""
+    if not getattr(conn, "probe_active", False) or token is None:
+        return False
+    with _SEND_LOCK:
+        item = conn.probe_outstanding.pop(token, None)
+    if item is None:
+        return False
+    command = item["cmd"]
+    now = time.monotonic()
+    conn.probe_last_reply = now
+    conn.probe_consecutive_missing = 0
+    rtt = now - item["sent"]
+    outcome, note = _probe_classify(command, envelope)
+    raw = _probe_co_raw(envelope)
+    if raw is not None:
+        samples = getattr(conn, "probe_raw", None)
+        if samples is None:
+            samples = conn.probe_raw = {}
+        text = raw.decode("latin1", errors="replace")
+        samples[command] = {
+            "outcome": outcome,
+            "note": note,
+            "token": token,
+            "text": text[:300],
+            "hex": raw[:96].hex(),
+        }
+        logged = getattr(conn, "probe_raw_logged", None)
+        if logged is None:
+            logged = conn.probe_raw_logged = set()
+        if outcome != "ack" and command not in logged:
+            logged.add(command)
+            log(f"[LIVE PROBE] raw {command} {outcome} {note}: {text[:120]!r}", level="warning")
+    with _SEND_LOCK:
+        stats = conn.probe_stats.get(command)
+        if stats is not None:
+            stats[outcome] += 1
+            stats["rtts"].append(rtt * 1000.0)
+    if note and outcome != "ack":
+        log(f"[LIVE PROBE] cmd={command} {outcome}: {note}", level="warning")
+    return True
+
+
+def _probe_write_json(conn: tcpstack.Connection) -> Optional[str]:
+    directory = os.path.dirname(STATE_CACHE_FILE) or "/data"
+    path = os.path.join(
+        directory, "live_probe_%s.json" % time.strftime("%Y%m%d_%H%M%S", time.localtime(conn.probe_started))
+    )
+    commands = {}
+    for command in conn.probe_commands_list:
+        stats = conn.probe_stats[command]
+        commands[command] = {
+            "n": stats["n"],
+            "ack": stats["ack"],
+            "nak": stats["nak"],
+            "missing": stats["missing"],
+            "mismatch": stats["mismatch"],
+            "rtt_ms": {
+                "p50": _probe_percentile(stats["rtts"], 0.50),
+                "p95": _probe_percentile(stats["rtts"], 0.95),
+            },
+        }
+    payload = {
+        "started": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(conn.probe_started)),
+        "finished": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "gap_sec": LIVE_PROBE_GAP_SEC,
+        "inflight": conn.probe_inflight,
+        "aborted": getattr(conn, "probe_abort_reason", None),
+        "remaining": len(getattr(conn, "probe_queue", [])),
+        "raw_samples": getattr(conn, "probe_raw", {}),
+        "commands": commands,
+    }
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+    except OSError as exc:
+        log(f"[LIVE PROBE] could not write {path}: {exc}", level="error")
+        return None
+    return path
+
+
+def _probe_finish(conn: tcpstack.Connection, aborted: Optional[str] = None) -> None:
+    conn.probe_active = False
+    conn.probe_done = True
+    conn.probe_aborted = aborted is not None
+    conn.probe_abort_reason = aborted
+    path = _probe_write_json(conn)
+    if aborted:
+        log(f"[LIVE PROBE] abort: {aborted}", level="warning")
+    for command in conn.probe_commands_list:
+        stats = conn.probe_stats[command]
+        p50 = _probe_percentile(stats["rtts"], 0.50)
+        p95 = _probe_percentile(stats["rtts"], 0.95)
+        rtt = "p50=%s p95=%s" % (
+            f"{p50:.0f}" if p50 is not None else "-",
+            f"{p95:.0f}" if p95 is not None else "-",
+        )
+        log(
+            f"[LIVE PROBE] cmd={command} inflight={conn.probe_inflight} "
+            f"n={stats['n']} ack={stats['ack']} nak={stats['nak']} "
+            f"missing={stats['missing']} mismatch={stats['mismatch']} rtt_ms {rtt}",
+            level="warning",
+        )
+    log(f"[LIVE PROBE] done json={path or 'not written'}")
+
+
+def _probe_tick(conn: tcpstack.Connection, now: float) -> None:
+    if not _probe_enabled():
+        return
+    if not getattr(conn, "probe_active", False):
+        if getattr(conn, "probe_done", False):
+            return
+        _probe_start(conn, now)
+    if not getattr(conn, "probe_active", False):
+        return
+    with _SEND_LOCK:
+        _probe_timeouts(conn, now)
+        if conn.probe_consecutive_missing >= LIVE_PROBE_MAX_CONSECUTIVE_MISSING:
+            _probe_finish(conn, f"{conn.probe_consecutive_missing} consecutive missing answers")
+            return
+        if now - getattr(conn, "probe_last_reply", now) > LIVE_PROBE_STALL_SEC:
+            _probe_finish(conn, f"no answer for {LIVE_PROBE_STALL_SEC:.0f}s")
+            return
+        if now >= conn.probe_next_send:
+            _probe_send_next(conn, now)
+        if not conn.probe_queue and not conn.probe_outstanding:
+            _probe_finish(conn)
 
 
 def send_control_switch(setting: str, turn_on: bool) -> bool:
@@ -1530,6 +1838,18 @@ def poll_due_connections() -> None:
     and the full dev_rpc poll when its interval has elapsed. Each part is switched
     on by its own option (LIVE_POLL_INTERVAL_SEC, TELEMETRY_POLL_INTERVAL_SEC); a
     no-op when both are 0."""
+    if _probe_enabled():
+        now = time.monotonic()
+        waiting = False
+        for conn in list(tcpstack.CONNECTIONS.values()):
+            if getattr(conn, "dtu_id", None) is None or conn.closed:
+                continue
+            if getattr(conn, "probe_done", False):
+                continue
+            waiting = True
+            _probe_tick(conn, now)
+        if waiting:
+            return
     live_interval = _live_interval()
     if TELEMETRY_POLL_INTERVAL_SEC <= 0 and live_interval <= 0:
         return

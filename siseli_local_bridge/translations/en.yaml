@@ -38,6 +38,18 @@ configuration:
   LIVE_POLL_INTERVAL_SEC:
     name: 'Live Status Interval (Seconds)'
     description: 'How often a cycle of live reads (PV, grid, output, battery, BMS and cell values, mode) is taken straight from the inverter; temperatures, energies and warnings are refreshed one by one every few cycles. The inverter data inside the regular poll is a cache the dongle refreshes only about once a minute; these reads bypass it. Default 10. Each cycle reads grid, output and PV power plus two of the other reads in turn (battery, BMS and cells, mode, then the slow ones), keeping two commands with the dongle, the next going as soon as one is answered: about 2.8 s a cycle, so the power values refresh every cycle and the rest every third. A value shorter than a cycle runs the cycles back to back. Values under 1 are raised to 1. 0 disables it. Only used when Local Cloud IP is set.'
+  LIVE_PROBE_COMMANDS:
+    name: 'Live Probe Commands'
+    description: 'Diagnostic probe for 100% local mode only. Comma-separated H/PI30 read commands, or "all" for the live poll set. Empty disables it. While it runs, the normal live and telemetry polls are stopped and each command is repeated LIVE_PROBE_REPEATS times; results go to [LIVE PROBE] logs and /data/live_probe_*.json. It aborts after 10 consecutive missing answers or 60 s without any reply, and writes a partial JSON with `aborted` set.'
+  LIVE_PROBE_REPEATS:
+    name: 'Live Probe Repeats'
+    description: 'How many times each command in Live Probe Commands is sent (default 50).'
+  LIVE_PROBE_GAP_SEC:
+    name: 'Live Probe Gap (Seconds)'
+    description: 'Pause between probe batches (default 2.0 s). Raise it to 2.5–3 s if the 2400 baud link loses answers.'
+  LIVE_PROBE_INFLIGHT:
+    name: 'Live Probe Inflight'
+    description: 'How many probe commands may be with the dongle at once: 1 (default) or 2. Use 1 for the first pass.'
   INVERTER_IP:
     name: 'Inverter IP Address'
     description: 'The local IPv4 address of your Siseli-compatible inverter (e.g. 192.168.1.139).'

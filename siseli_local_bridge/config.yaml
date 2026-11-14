@@ -34,6 +34,13 @@ options:
   TELEMETRY_POLL_INTERVAL_SEC: 0
   LIVE_POLL_INTERVAL_SEC: 10
 
+  # Diagnostic command probe (100% local only). Empty LIVE_PROBE_COMMANDS = off.
+  # "all" expands to the live poll's command set. Results: [LIVE PROBE] + /data/live_probe_*.json.
+  LIVE_PROBE_COMMANDS: ''
+  LIVE_PROBE_REPEATS: 50
+  LIVE_PROBE_GAP_SEC: 2.0
+  LIVE_PROBE_INFLIGHT: 1
+
   INVERTER_IP: '192.168.1.50'
   ROUTER_IP: '192.168.1.1'
   INVERTER_MAC: ''
@@ -83,6 +90,10 @@ schema:
   MQTT_BROKER_HOSTNAME: str?
   TELEMETRY_POLL_INTERVAL_SEC: int(0,)
   LIVE_POLL_INTERVAL_SEC: int(0,3600)
+  LIVE_PROBE_COMMANDS: str?
+  LIVE_PROBE_REPEATS: int(1,100000)
+  LIVE_PROBE_GAP_SEC: float(0,60)
+  LIVE_PROBE_INFLIGHT: int(1,2)
 
   INVERTER_IP: str
   ROUTER_IP: str
