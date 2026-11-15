@@ -1,6 +1,6 @@
 name: 'Siseli Local Bridge'
 description: 'Local bridge for Siseli-compatible inverters with MQTT discovery for Home Assistant.'
-version: '2.8.1'
+version: '2.8.2'
 slug: 'siseli_local_bridge'
 url: 'https://github.com/msergein/siseli-ha'
 init: false

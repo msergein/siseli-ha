@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.8.2] - 2026-11-15
+
+### Fixed
+
+- **Restore the fake-cloud IP at container/startup.** The Docker image and `run.sh`
+  now call `ensure-local-cloud-ip.sh`: it reads `LOCAL_CLOUD_IP`, finds the interface
+  (or uses `SNIFF_IFACE`), and adds the address if it is missing. A container restart
+  no longer leaves the dongle resolving `.250` while the host has lost that alias.
+
 ## [2.8.1] - 2026-11-14
 
 ### Added

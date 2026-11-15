@@ -2,7 +2,7 @@
 
 [English](README.md) | **Русский**
 
-[![Siseli Local Bridge](https://img.shields.io/badge/version-2.8.1-blue.svg?label=Siseli%20Local%20Bridge)](siseli_local_bridge/CHANGELOG.md)
+[![Siseli Local Bridge](https://img.shields.io/badge/version-2.8.2-blue.svg?label=Siseli%20Local%20Bridge)](siseli_local_bridge/CHANGELOG.md)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-Add--on-green.svg)](https://www.home-assistant.io/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey.svg)](LICENSE)
 
@@ -48,6 +48,8 @@ Assistant через MQTT auto-discovery. Поддерживаются три р
   `HTTP_BOOTSTRAP_MODE` (`local` / `cloud` / `cloud_then_local`);
 - **поддержка BMS HPVINV08** — aliases `dbXf`/`MzuA` и исправление направления тока;
 - **диагностический live probe** (`LIVE_PROBE_*`) и **Docker deployment**;
+- **восстановление IP fake-cloud при старте контейнера** из `LOCAL_CLOUD_IP`, если
+  адрес на интерфейсе пропал;
 - **русский README** и проверенный путь Docker Compose.
 
 В этом форке пока **не проверены**:
@@ -246,8 +248,9 @@ docker compose up -d --build
 docker compose logs -f siseli-local-bridge
 ```
 
-Для **100% local** или **hybrid relay** добавь адрес локального облака на интерфейс
-хоста:
+Для **100% local** или **hybrid relay** entrypoint контейнера теперь сам добавляет
+адрес локального облака из `LOCAL_CLOUD_IP`, если его нет. Используется `SNIFF_IFACE`,
+а если он пуст — интерфейс маршрута по умолчанию. Вручную это эквивалентно:
 
 ```bash
 sudo ip addr add 192.168.1.250/24 dev eth0

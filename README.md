@@ -2,7 +2,7 @@
 
 **English** | [Русский](README.ru.md)
 
-[![Siseli Local Bridge](https://img.shields.io/badge/version-2.8.1-blue.svg?label=Siseli%20Local%20Bridge)](siseli_local_bridge/CHANGELOG.md)
+[![Siseli Local Bridge](https://img.shields.io/badge/version-2.8.2-blue.svg?label=Siseli%20Local%20Bridge)](siseli_local_bridge/CHANGELOG.md)
 [![HA Add-on](https://img.shields.io/badge/Home%20Assistant-Add--on-green.svg)](https://www.home-assistant.io/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey.svg)](LICENSE)
 
@@ -55,6 +55,8 @@ Compared with upstream `siseli-local-bridge`, this fork adds:
   (`local` / `cloud` / `cloud_then_local`).
 - **HPVINV08 BMS support** — `dbXf`/`MzuA` aliases and the BMS current-direction fix.
 - **Diagnostic live probe** (`LIVE_PROBE_*`) and **Docker deployment** documentation.
+- **Container startup restores the fake-cloud IP** from `LOCAL_CLOUD_IP` if the host
+  alias is missing.
 - **Russian README** and a tested Docker Compose path.
 
 Not yet verified in this fork:
@@ -177,8 +179,9 @@ docker compose up -d --build
 docker compose logs -f siseli-local-bridge
 ```
 
-For **100% local** or **hybrid relay**, add the local-cloud address to the host interface
-before starting:
+For **100% local** or **hybrid relay**, the container entrypoint now adds the
+local-cloud address automatically from `LOCAL_CLOUD_IP` if it is missing. It uses
+`SNIFF_IFACE` when set, otherwise the default-route interface. The manual equivalent is:
 
 ```bash
 sudo ip addr add 192.168.1.250/24 dev eth0

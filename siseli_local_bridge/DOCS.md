@@ -342,7 +342,7 @@ inverter offline for as long as this mode is on.
 
 | Option | Default | Notes |
 |---|---|---|
-| `LOCAL_CLOUD_IP` | *(blank)* | The Network IP Alias address, without the `/24`. Blank keeps pass-through mode |
+| `LOCAL_CLOUD_IP` | *(blank)* | The Network IP Alias address, without the `/24`. Blank keeps pass-through mode. The Docker entrypoint and `run.sh` add it automatically when missing, using `SNIFF_IFACE` or the default-route interface |
 | `LOCAL_CLOUD_PORT` | `1883` | Port of the built-in MQTT broker the dongle connects to. Keep the real cloud's port |
 | `HTTP_STUB_PORT` | `80` | Port of the built-in HTTP API that answers the dongle's boot-time check-in and broker lookup |
 | `HTTP_STUB_REAL_IPS` | `8.212.16.60` | The vendor's HTTP address. Some dongles call it directly without DNS; it is answered locally too |
