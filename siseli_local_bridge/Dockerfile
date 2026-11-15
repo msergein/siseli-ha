@@ -35,6 +35,7 @@ WORKDIR /app
 COPY . .
 
 # Fix line endings for shell scripts and make them executable
-RUN dos2unix run.sh && chmod a+x run.sh
+RUN dos2unix run.sh ensure-local-cloud-ip.sh \
+    && chmod a+x run.sh ensure-local-cloud-ip.sh
 
 CMD [ "./run.sh" ]

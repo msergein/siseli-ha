@@ -95,6 +95,10 @@ LIVE_MONITOR_ONLY = os.getenv("LIVE_MONITOR_ONLY", "0").strip().lower() in ("1",
 MONITOR_MAX_BYTES = int(os.getenv("MONITOR_MAX_BYTES", str(20 * 1024 * 1024)) or 20 * 1024 * 1024)
 MONITOR_BACKUPS = max(1, int(os.getenv("MONITOR_BACKUPS", "5") or 5))
 
+#: Who answers the dongle's HTTP bootstrap: the local stub, the vendor cloud, or
+#: the cloud first with a local fallback on network failure.
+HTTP_BOOTSTRAP_MODE = os.getenv("HTTP_BOOTSTRAP_MODE", "local").strip().lower() or "local"
+
 # Comma-separated, each suffix-matched rather than an exact hostname: the vendor's
 # own broker name observed in a real capture was "hongkong.broker.mqtt.solar.
 # siseli.com" (2026-09-11), a region-prefixed subdomain, so matching only that
@@ -432,6 +436,12 @@ def validate_config() -> None:
 
     if LANGUAGE not in ("en", "fr"):
         errors.append(f"LANGUAGE must be 'en' or 'fr', got {LANGUAGE!r}")
+
+    if HTTP_BOOTSTRAP_MODE not in ("local", "cloud", "cloud_then_local"):
+        errors.append(
+            "HTTP_BOOTSTRAP_MODE must be 'local', 'cloud' or 'cloud_then_local', "
+            f"got {HTTP_BOOTSTRAP_MODE!r}"
+        )
 
     if INVERTER_COUNT < 1:
         errors.append(f"INVERTER_COUNT must be >= 1, got {INVERTER_COUNT}")

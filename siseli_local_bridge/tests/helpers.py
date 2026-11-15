@@ -65,6 +65,7 @@ BASE_ENV = {
     "LOCAL_CLOUD_PORT": "1883",
     "HTTP_STUB_PORT": "80",
     "HTTP_STUB_REAL_IPS": "8.212.16.60",
+    "HTTP_BOOTSTRAP_MODE": "local",
     "DNS_SPOOF_DOMAIN": "broker.mqtt.solar.siseli.com,dtu.access.solar.siseli.com",
     "MQTT_BROKER_HOSTNAME": "hongkong.broker.mqtt.solar.siseli.com",
     "EXPIRE_AFTER_SEC": "1800",

@@ -35,7 +35,7 @@ import urllib.request
 from typing import Optional
 
 from . import tcpstack
-from .config import DEV_SN, HTTP_STUB_REAL_IPS, MQTT_BROKER_HOSTNAME
+from .config import DEV_SN, HTTP_BOOTSTRAP_MODE, HTTP_STUB_REAL_IPS, MQTT_BROKER_HOSTNAME
 from .loggers import log
 
 _HEADER_END = b"\r\n\r\n"
@@ -149,7 +149,7 @@ def _handle_servers_mqtt(request: Optional[dict] = None) -> bytes:
     return _json_response({"code": 0, "msg": "Success", "data": {"main": server, "mains": [server]}})
 
 
-def _handle_gather_protocol(request: Optional[dict] = None) -> bytes:
+def _handle_gather_protocol(request: Optional[dict] = None, allow_upstream: bool = True) -> bytes:
     """The protocol descriptor request added by firmware V1.44.5_SolarV67.
 
     The dongle sends it right after /dtu/checkin and expects the vendor's protocol
@@ -162,7 +162,7 @@ def _handle_gather_protocol(request: Optional[dict] = None) -> bytes:
     headers = (request or {}).get("headers") or {}
     auth = headers.get("authorization")
     path = (request or {}).get("path", "")
-    if auth and path:
+    if auth and path and allow_upstream:
         upstream = "http://" + (HTTP_STUB_REAL_IPS[0] if HTTP_STUB_REAL_IPS else "8.212.16.60") + path
         forwarded = {k: v for k, v in headers.items()
                      if k not in ("host", "connection", "content-length")}
@@ -266,9 +266,30 @@ _ROUTES = {
     ("GET", "/dtu/device/syncTime/cmd"): _handle_sync_time,
 }
 
+#: The boot-time calls that may be answered by the real cloud in relay mode.
+#: /dtu/servers/mqtt stays local: it names the broker the dongle must use.
+_BOOTSTRAP_PROXY_PATHS = {
+    "/dtu/checkin",
+    "/dtu/devices/findSingle",
+    "/dtu/gatherProtocol",
+    "/dtu/device/syncTime/cmd",
+}
+
 
 def _handle_request(request: dict) -> bytes:
     key = (request["method"], request["path"].split("?", 1)[0])
+    path_key = key[1]
+    if HTTP_BOOTSTRAP_MODE != "local" and path_key in _BOOTSTRAP_PROXY_PATHS:
+        proxied = _proxy_to_cloud(request)
+        if proxied is not None:
+            log(f"[HTTP STUB] {HTTP_BOOTSTRAP_MODE} -> cloud {request['method']} {request['path']}")
+            return proxied
+        if HTTP_BOOTSTRAP_MODE == "cloud":
+            log(f"[HTTP STUB] cloud bootstrap failed, no fallback: {request['method']} {request['path']}", level="warning")
+            return b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n"
+        log(f"[HTTP STUB] cloud bootstrap failed, local fallback: {request['method']} {request['path']}", level="warning")
+        if path_key == "/dtu/gatherProtocol":
+            return _handle_gather_protocol(request, allow_upstream=False)
     handler = _ROUTES.get(key)
     if handler is None:
         proxied = _proxy_to_cloud(request)

@@ -13,6 +13,7 @@ export LOCAL_CLOUD_IP="$(bashio::config 'LOCAL_CLOUD_IP' '')"
 export LOCAL_CLOUD_PORT="$(bashio::config 'LOCAL_CLOUD_PORT' '1883')"
 export HTTP_STUB_PORT="$(bashio::config 'HTTP_STUB_PORT' '80')"
 export HTTP_STUB_REAL_IPS="$(bashio::config 'HTTP_STUB_REAL_IPS' '8.212.16.60')"
+export HTTP_BOOTSTRAP_MODE="$(bashio::config 'HTTP_BOOTSTRAP_MODE' 'local')"
 export DNS_SPOOF_DOMAIN="$(bashio::config 'DNS_SPOOF_DOMAIN' 'broker.mqtt.solar.siseli.com,dtu.access.solar.siseli.com')"
 export MQTT_BROKER_HOSTNAME="$(bashio::config 'MQTT_BROKER_HOSTNAME' 'hongkong.broker.mqtt.solar.siseli.com')"
 export TELEMETRY_POLL_INTERVAL_SEC="$(bashio::config 'TELEMETRY_POLL_INTERVAL_SEC' '0')"
@@ -63,5 +64,9 @@ export BATTERY_CAPACITY_PER_BATTERY_AH="$(bashio::config 'BATTERY_CAPACITY_PER_B
 echo "[Config] INVERTER_IP=${INVERTER_IP} ROUTER_IP=${ROUTER_IP}"
 echo "[Config] TARGET=${TARGET_HOST}:${TARGET_PORT} MQTT=${MQTT_HOST}:${MQTT_PORT}"
 echo "[Config] AUTO_INTERCEPT=${AUTO_INTERCEPT} FORWARD_ALL_INVERTER_TRAFFIC=${FORWARD_ALL_INVERTER_TRAFFIC}"
+
+if [ -n "${LOCAL_CLOUD_IP:-}" ]; then
+    /app/ensure-local-cloud-ip.sh
+fi
 
 exec python3 -u -m src.siseli_local_bridge.core
