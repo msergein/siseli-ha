@@ -2,7 +2,7 @@
 
 **English** | [Русский](README.ru.md)
 
-[![Siseli Local Bridge](https://img.shields.io/badge/version-2.8.2-blue.svg?label=Siseli%20Local%20Bridge)](siseli_local_bridge/CHANGELOG.md)
+[![Siseli Local Bridge](https://img.shields.io/badge/version-2.8.3-blue.svg?label=Siseli%20Local%20Bridge)](siseli_local_bridge/CHANGELOG.md)
 [![HA Add-on](https://img.shields.io/badge/Home%20Assistant-Add--on-green.svg)](https://www.home-assistant.io/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey.svg)](LICENSE)
 
@@ -55,8 +55,9 @@ Compared with upstream `siseli-local-bridge`, this fork adds:
   (`local` / `cloud` / `cloud_then_local`).
 - **HPVINV08 BMS support** — `dbXf`/`MzuA` aliases and the BMS current-direction fix.
 - **Diagnostic live probe** (`LIVE_PROBE_*`) and **Docker deployment** documentation.
-- **Container startup restores the fake-cloud IP** from `LOCAL_CLOUD_IP` if the host
-  alias is missing.
+- **The fake-cloud IP is restored at startup and re-checked while running.** The
+  watchdog re-adds `LOCAL_CLOUD_IP` if NetworkManager drops the alias on a link
+  flap or DHCP renewal.
 - **Russian README** and a tested Docker Compose path.
 
 Not yet verified in this fork:
@@ -179,8 +180,11 @@ docker compose up -d --build
 docker compose logs -f siseli-local-bridge
 ```
 
-For **100% local** or **hybrid relay**, the container entrypoint now adds the
-local-cloud address automatically from `LOCAL_CLOUD_IP` if it is missing. It uses
+For **100% local** or **hybrid relay**, the container entrypoint adds the local-cloud
+address automatically from `LOCAL_CLOUD_IP` if it is missing, and keeps checking it
+every 15 seconds. The watchdog is needed because NetworkManager removes secondary
+addresses that are not part of its connection profile when the link flaps or the DHCP
+lease is renewed — the dongle then resolves `.250` but nothing answers. It uses
 `SNIFF_IFACE` when set, otherwise the default-route interface. The manual equivalent is:
 
 ```bash

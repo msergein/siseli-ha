@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.8.3] - 2026-11-21
+
+### Fixed
+
+- **Keep the fake-cloud IP alive while the bridge runs.** `ensure-local-cloud-ip.sh`
+  gained `--watch SECONDS`. The Docker command and `run.sh` re-check
+  `LOCAL_CLOUD_IP` every 15 seconds and add it back if it disappeared. On
+  2026-11-21 NetworkManager reactivated `enp2s0` after several link flaps,
+  flushed the manually added `.250`, and the dongle kept resolving an address
+  nobody owned; telemetry stopped until the alias was restored.
+
 ## [2.8.2] - 2026-11-15
 
 ### Fixed

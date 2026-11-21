@@ -66,7 +66,7 @@ echo "[Config] TARGET=${TARGET_HOST}:${TARGET_PORT} MQTT=${MQTT_HOST}:${MQTT_POR
 echo "[Config] AUTO_INTERCEPT=${AUTO_INTERCEPT} FORWARD_ALL_INVERTER_TRAFFIC=${FORWARD_ALL_INVERTER_TRAFFIC}"
 
 if [ -n "${LOCAL_CLOUD_IP:-}" ]; then
-    /app/ensure-local-cloud-ip.sh
+    /app/ensure-local-cloud-ip.sh --watch 15
 fi
 
 exec python3 -u -m src.siseli_local_bridge.core
